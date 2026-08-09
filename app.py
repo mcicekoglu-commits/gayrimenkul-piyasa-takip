@@ -4,7 +4,7 @@ import json
 import unicodedata
 from urllib.parse import urlencode, quote
 
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, redirect
 
 app = Flask(__name__)
 
@@ -568,6 +568,8 @@ def home():
                 "title": f"Harita seçimi: {lat or '-'}, {lng or '-'} · {radius} km",
                 "url": "https://www.sahibinden.com/satilik-daire/istanbul",
             })
+    if request.method == "POST" and len(results) == 1:
+        return redirect(results[0]["url"])
 
     return render_template_string(
         PAGE,
