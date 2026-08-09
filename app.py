@@ -175,6 +175,10 @@ summary{padding:11px 0;font-weight:700}
 .result{padding:10px;border:1px solid #d9dde3;border-radius:10px;margin-top:8px}
 .result-links{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}
 .result-links a{display:inline-block;padding:10px;border-radius:8px;background:#181818;color:#fff;text-align:center;text-decoration:none;font-weight:700}
+.compact-links{margin-top:6px;font-size:14px;line-height:1.7}
+.compact-links a{color:#4b5563;text-decoration:none;font-weight:600}
+.compact-links span{color:#9ca3af}
+
 .count{font-size:12px;color:#6b7280;font-weight:400}
 @media(max-width:600px){
   .grid,.neighborhoods,.pair{grid-template-columns:1fr 1fr}
@@ -187,7 +191,7 @@ summary{padding:11px 0;font-weight:700}
 <h1>PAS</h1>
 <div class="subtitle">Piyasa Arama Sistemi</div>
 
-<form method="post" action="/#results" id="pasForm">
+<form method="post" action="/" id="pasForm">
 <div class="card">
 <div class="title">Arama yöntemi</div>
 <div class="segmented two">
@@ -279,12 +283,9 @@ summary{padding:11px 0;font-weight:700}
 {% for r in results %}
 <div class="result">
     <strong>{{ r.district }}</strong>
-    <div class="small" style="margin-top:6px">
-        {{ r.neighborhoods|join(" · ") if r.neighborhoods else "İlçe geneli" }}
-    </div>
-    <div class="result-links">
+    <div class="compact-links">
     {% for link in r.links %}
-        <a href="{{ link.url }}" target="_blank" rel="noopener">{{ link.name }}</a>
+        <a href="{{ link.url }}" target="_blank" rel="noopener">{{ link.name }}</a>{% if not loop.last %}<span> · </span>{% endif %}
     {% endfor %}
     </div>
 </div>
@@ -438,11 +439,20 @@ document.getElementById("pasForm").addEventListener("submit",event=>{
   });
  }
 
+ sessionStorage.setItem("PAS_SCROLL_Y", String(window.scrollY));
  saveState();
 });
 
 initMap();
 restoreState();
+
+const savedScrollY = sessionStorage.getItem("PAS_SCROLL_Y");
+if(savedScrollY !== null){
+    sessionStorage.removeItem("PAS_SCROLL_Y");
+    requestAnimationFrame(() => {
+        window.scrollTo(0, Number(savedScrollY) || 0);
+    });
+}
 </script>
 </body>
 </html>
