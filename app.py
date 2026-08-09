@@ -1,12 +1,26 @@
 import os
 import re
 import json
+import math
+import random
+import statistics
 import unicodedata
-from urllib.parse import urlencode, quote
+from dataclasses import dataclass, asdict
+from datetime import date, timedelta
 
 from flask import Flask, request, render_template_string, jsonify
 
 app = Flask(__name__)
+
+# =========================================================
+# PAS — Piyasa Arama Sistemi
+# Mimari:
+#   UI -> /api/search -> ListingProvider -> normalize -> analyze
+#
+# Şu an aktif sağlayıcı: DemoListingProvider
+# Daha sonra yetkili Sahibinden API erişimi olduğunda
+# yalnızca provider katmanı değiştirilecek.
+# =========================================================
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -107,95 +121,292 @@ NEIGHBORHOODS = {
     ],
 }
 
-def slugify(text):
-    text = (text or "").strip().lower()
-    table = str.maketrans({
-        "ı": "i", "ğ": "g", "ü": "u",
-        "ş": "s", "ö": "o", "ç": "c",
-    })
-    text = text.translate(table)
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(c for c in text if not unicodedata.combining(c))
-    return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+DISTRICT_BASE_M2 = {
+    "Kadıköy": 145000,
+    "Beykoz": 118000,
+    "Üsküdar": 132000,
+    "Ataşehir": 111000,
+    "Maltepe": 91000,
+    "Kartal": 80000,
+    "Çekmeköy": 73000,
+    "Beşiktaş": 190000,
+    "Şişli": 142000,
+    "Bakırköy": 124000,
+    "Bahçelievler": 78000,
+}
 
-def sahibinden_url(district, neighborhood="", street="", min_price="", max_price=""):
-    base = "https://www.sahibinden.com/satilik-daire/istanbul-" + slugify(district)
-    params = {}
+ROOMS = ["1+1", "2+1", "3+1", "4+1", "5+1 ve üzeri"]
 
-    search_parts = [x.strip() for x in (neighborhood, street) if x and x.strip()]
-    if search_parts:
-        params["query_text"] = " ".join(search_parts)
-    if min_price:
-        params["price_min"] = min_price
-    if max_price:
-        params["price_max"] = max_price
 
-    return base if not params else base + "?" + urlencode(params, quote_via=quote)
+@dataclass
+class Listing:
+    id: str
+    district: str
+    neighborhood: str
+    title: str
+    price: int
+    gross_m2: int
+    net_m2: int
+    rooms: str
+    listing_date: str
+    source: str = "demo"
+
+    @property
+    def gross_price_m2(self):
+        return round(self.price / self.gross_m2) if self.gross_m2 else None
+
+    @property
+    def net_price_m2(self):
+        return round(self.price / self.net_m2) if self.net_m2 else None
+
+    def to_dict(self):
+        d = asdict(self)
+        d["gross_price_m2"] = self.gross_price_m2
+        d["net_price_m2"] = self.net_price_m2
+        return d
+
+
+class ListingProvider:
+    """Yetkili veri kaynağı entegrasyonu için arayüz."""
+
+    name = "base"
+
+    def search(self, filters):
+        raise NotImplementedError
+
+
+class DemoListingProvider(ListingProvider):
+    """
+    Geliştirme sağlayıcısı.
+    Gerçek Sahibinden verisi çekmez.
+    Aynı filtrelerle her seferinde aynı örnek ilanları üretir.
+    """
+
+    name = "demo"
+
+    def search(self, filters):
+        districts = filters.get("districts") or []
+        selected_neighborhoods = filters.get("neighborhoods") or {}
+        requested_rooms = filters.get("rooms") or ""
+
+        min_m2 = parse_int(filters.get("min_m2"))
+        max_m2 = parse_int(filters.get("max_m2"))
+        min_price = parse_int(filters.get("min_price"))
+        max_price = parse_int(filters.get("max_price"))
+        net_m2_min = parse_int(filters.get("net_m2_min"))
+        net_m2_max = parse_int(filters.get("net_m2_max"))
+        gross_m2_min = parse_int(filters.get("gross_m2_min"))
+        gross_m2_max = parse_int(filters.get("gross_m2_max"))
+
+        rows = []
+
+        for district in districts:
+            nbs = selected_neighborhoods.get(district) or NEIGHBORHOODS.get(district, [])[:5]
+            base_m2 = DISTRICT_BASE_M2.get(district, 90000)
+
+            for neighborhood in nbs:
+                seed = stable_seed(f"{district}|{neighborhood}")
+                rng = random.Random(seed)
+
+                for i in range(8):
+                    gross = rng.randint(55, 220)
+                    net = max(40, round(gross * rng.uniform(0.78, 0.92)))
+                    rooms = rng.choice(ROOMS)
+
+                    neighborhood_factor = 0.88 + (stable_seed(neighborhood) % 30) / 100
+                    listing_factor = rng.uniform(0.88, 1.18)
+                    price_m2 = int(base_m2 * neighborhood_factor * listing_factor)
+                    price = int(round((price_m2 * gross) / 50000) * 50000)
+
+                    listed = date.today() - timedelta(days=rng.randint(0, 45))
+
+                    row = Listing(
+                        id=f"DEMO-{stable_seed(district + neighborhood + str(i))}",
+                        district=district,
+                        neighborhood=neighborhood,
+                        title=f"{neighborhood} {rooms} {gross} m² daire",
+                        price=price,
+                        gross_m2=gross,
+                        net_m2=net,
+                        rooms=rooms,
+                        listing_date=listed.isoformat(),
+                    )
+
+                    if requested_rooms and requested_rooms != row.rooms:
+                        continue
+                    if min_m2 is not None and row.gross_m2 < min_m2:
+                        continue
+                    if max_m2 is not None and row.gross_m2 > max_m2:
+                        continue
+                    if min_price is not None and row.price < min_price:
+                        continue
+                    if max_price is not None and row.price > max_price:
+                        continue
+                    if net_m2_min is not None and row.net_price_m2 < net_m2_min:
+                        continue
+                    if net_m2_max is not None and row.net_price_m2 > net_m2_max:
+                        continue
+                    if gross_m2_min is not None and row.gross_price_m2 < gross_m2_min:
+                        continue
+                    if gross_m2_max is not None and row.gross_price_m2 > gross_m2_max:
+                        continue
+
+                    rows.append(row)
+
+        return rows
+
+
+class AuthorizedSahibindenProvider(ListingProvider):
+    """
+    YETKİLİ API BAĞLANTISI İÇİN HAZIR NOKTA.
+
+    Gerçek API erişimin olduğunda:
+      1) Bu sınıfa kimlik doğrulama bilgileri eklenecek.
+      2) Sahibinden'in izin verdiği endpoint çağrılacak.
+      3) Dönen alanlar Listing nesnesine normalize edilecek.
+      4) PROVIDER aşağıda bu sınıfa çevrilecek.
+
+    Koruma aşma / izinsiz scraping burada uygulanmıyor.
+    """
+
+    name = "authorized_sahibinden"
+
+    def search(self, filters):
+        raise RuntimeError(
+            "Yetkili Sahibinden API bağlantısı henüz yapılandırılmadı."
+        )
+
+
+PROVIDER = DemoListingProvider()
+
+
+def parse_int(value):
+    if value in (None, ""):
+        return None
+    try:
+        return int(str(value).replace(".", "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def stable_seed(text):
+    total = 0
+    for i, ch in enumerate(str(text), start=1):
+        total += i * ord(ch)
+    return total % 10_000_000
+
+
+def percentile(values, p):
+    if not values:
+        return None
+    vals = sorted(values)
+    if len(vals) == 1:
+        return vals[0]
+    k = (len(vals) - 1) * p
+    f = math.floor(k)
+    c = math.ceil(k)
+    if f == c:
+        return vals[int(k)]
+    return round(vals[f] * (c - k) + vals[c] * (k - f))
+
+
+def analyze(listings):
+    if not listings:
+        return {
+            "count": 0,
+            "median_price": None,
+            "avg_price": None,
+            "median_gross_m2_price": None,
+            "avg_gross_m2_price": None,
+            "q1_gross_m2_price": None,
+            "q3_gross_m2_price": None,
+            "by_neighborhood": [],
+        }
+
+    prices = [x.price for x in listings]
+    m2s = [x.gross_price_m2 for x in listings if x.gross_price_m2]
+
+    grouped = {}
+    for x in listings:
+        key = f"{x.district} · {x.neighborhood}"
+        grouped.setdefault(key, []).append(x)
+
+    by_neighborhood = []
+    for key, rows in grouped.items():
+        row_prices = [x.price for x in rows]
+        row_m2s = [x.gross_price_m2 for x in rows if x.gross_price_m2]
+        by_neighborhood.append({
+            "name": key,
+            "count": len(rows),
+            "median_price": round(statistics.median(row_prices)),
+            "median_gross_m2_price": round(statistics.median(row_m2s)),
+        })
+
+    by_neighborhood.sort(
+        key=lambda x: x["median_gross_m2_price"],
+        reverse=True
+    )
+
+    return {
+        "count": len(listings),
+        "median_price": round(statistics.median(prices)),
+        "avg_price": round(statistics.mean(prices)),
+        "median_gross_m2_price": round(statistics.median(m2s)),
+        "avg_gross_m2_price": round(statistics.mean(m2s)),
+        "q1_gross_m2_price": percentile(m2s, 0.25),
+        "q3_gross_m2_price": percentile(m2s, 0.75),
+        "by_neighborhood": by_neighborhood,
+    }
+
 
 PAGE = r"""
 <!doctype html>
 <html lang="tr">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PAS</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
 *{box-sizing:border-box}
-html{scroll-behavior:smooth}
-body{margin:0;padding:14px;background:#f4f5f7;color:#1f2937;font-family:Arial,Helvetica,sans-serif}
-.container{max-width:850px;margin:auto}
-h1{font-size:44px;margin:0}
+body{margin:0;padding:14px;background:#f4f5f7;color:#18202b;font-family:Arial,Helvetica,sans-serif}
+.container{max-width:900px;margin:auto}
+h1{font-size:46px;margin:0}
 .subtitle{color:#6b7280;margin:4px 0 18px}
-.card{background:#fff;border-radius:16px;padding:15px;margin-bottom:14px;box-shadow:0 4px 18px rgba(0,0,0,.07)}
-.title{font-weight:700;margin-bottom:10px}
+.card{background:#fff;border-radius:18px;padding:16px;margin-bottom:14px;box-shadow:0 4px 18px rgba(0,0,0,.07)}
+.title{font-size:19px;font-weight:800;margin-bottom:11px}
 .small{font-size:13px;color:#6b7280}
-.segmented{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:12px}
-.segmented.two{grid-template-columns:repeat(2,1fr)}
-.seg input{display:none}
-.seg span{display:block;text-align:center;padding:10px 6px;border:1px solid #d9dde3;border-radius:10px;font-weight:600}
-.seg input:checked+span{background:#1f2937;color:#fff;border-color:#1f2937}
-.favorite-box{background:#fffaf0;border:1px solid #eadfbe;border-radius:12px;padding:11px;margin-bottom:10px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}
-.check{display:flex;gap:8px;align-items:center;padding:9px;border:1px solid #d9dde3;border-radius:10px;background:#fff}
+.badge{display:inline-block;padding:5px 8px;border-radius:999px;background:#eef2f7;font-size:12px;font-weight:700}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.check{display:flex;align-items:center;gap:8px;padding:10px;border:1px solid #d9dde3;border-radius:11px;background:#fff}
 .check input{width:18px;height:18px}
-.district-block{border:1px solid #d9dde3;border-radius:12px;margin-top:10px;overflow:hidden}
-.district-head{background:#f2f3f5;padding:10px 12px;font-weight:700;display:flex;justify-content:space-between;gap:8px}
-.neighborhoods{padding:9px;display:grid;grid-template-columns:1fr 1fr;gap:7px}
-label.field{display:block;font-weight:700;margin:10px 0 5px}
-input[type=number],input[type=text],select{width:100%;padding:10px;border:1px solid #d9dde3;border-radius:10px;font-size:16px}
-.pair{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.favorite{background:#fffaf0;border:1px solid #eadfbe;border-radius:12px;padding:11px;margin-bottom:10px}
+.segmented{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:12px}
+.seg input{display:none}
+.seg span{display:block;text-align:center;padding:11px 5px;border:1px solid #d9dde3;border-radius:10px;font-weight:700}
+.seg input:checked+span{background:#1f2937;color:white;border-color:#1f2937}
 details{border:1px solid #d9dde3;border-radius:12px;padding:0 11px;margin-top:9px}
-summary{padding:11px 0;font-weight:700}
-.details-body{padding-bottom:11px}
-.primary{width:100%;margin-top:14px;padding:14px;border:0;border-radius:10px;background:#181818;color:#fff;font-size:17px;font-weight:700}
+summary{padding:11px 0;font-weight:800;cursor:pointer}
+.neighborhood-box{border:1px solid #d9dde3;border-radius:12px;margin-top:10px;overflow:hidden}
+.neighborhood-head{background:#f2f3f5;padding:10px 12px;font-weight:800;display:flex;justify-content:space-between}
+.neighborhoods{padding:9px;display:grid;grid-template-columns:1fr 1fr;gap:7px}
+label.field{display:block;font-weight:800;margin:10px 0 5px}
+input[type=number],input[type=text],select{width:100%;padding:11px;border:1px solid #d9dde3;border-radius:10px;font-size:16px}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.primary{width:100%;margin-top:14px;padding:15px;border:0;border-radius:11px;background:#181818;color:#fff;font-size:18px;font-weight:800}
+.primary:disabled{opacity:.55}
 .hidden{display:none!important}
-#map{height:300px;border-radius:12px;margin-top:10px}
-.warn{background:#fff8e8;border:1px solid #ead9a8;border-radius:10px;padding:10px;font-size:14px}
-.result{padding:10px;border:1px solid #d9dde3;border-radius:10px;margin-top:8px}
-.result-links{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}
-.result-links a{display:inline-block;padding:10px;border-radius:8px;background:#181818;color:#fff;text-align:center;text-decoration:none;font-weight:700}
-.compact-links{margin-top:6px;font-size:14px;line-height:1.7}
-.compact-links a{
-  display:inline-block;
-  color:#111827;
-  background:#f3f4f6;
-  border:1px solid #d1d5db;
-  border-radius:8px;
-  padding:7px 10px;
-  margin:3px 2px 3px 0;
-  text-decoration:none;
-  font-weight:700;
-  -webkit-tap-highlight-color:rgba(0,0,0,.08);
-  touch-action:manipulation;
-  cursor:pointer;
-}
-.compact-links span{color:#9ca3af}
-
-.count{font-size:12px;color:#6b7280;font-weight:400}
+.metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.metric{padding:12px;border:1px solid #e1e5ea;border-radius:12px}
+.metric .k{font-size:12px;color:#6b7280}
+.metric .v{font-size:20px;font-weight:800;margin-top:3px}
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:10px 8px;border-bottom:1px solid #eceff3;text-align:left;white-space:nowrap}
+th{font-size:12px;color:#6b7280}
+.notice{background:#eef6ff;border:1px solid #cfe3ff;border-radius:10px;padding:10px;font-size:13px}
+.error{background:#fff1f1;border:1px solid #f4c4c4;border-radius:10px;padding:10px;font-size:13px}
 @media(max-width:600px){
-  .grid,.neighborhoods,.pair{grid-template-columns:1fr 1fr}
-  .result-links a{width:100%}
+ .grid,.neighborhoods,.pair,.metrics{grid-template-columns:1fr 1fr}
 }
 </style>
 </head>
@@ -204,127 +415,128 @@ summary{padding:11px 0;font-weight:700}
 <h1>PAS</h1>
 <div class="subtitle">Piyasa Arama Sistemi</div>
 
-<form method="post" action="/" id="pasForm">
 <div class="card">
-<div class="title">Arama yöntemi</div>
-<div class="segmented two">
-<label class="seg"><input type="radio" name="mode" value="list" checked><span>Listeden Seç</span></label>
-<label class="seg"><input type="radio" name="mode" value="map"><span>Haritadan Seç</span></label>
+<div class="notice">
+<strong>Veri sağlayıcı:</strong> Demo veri modu.
+Arayüz ve analiz motoru hazır; yetkili Sahibinden API erişimi bağlandığında aynı ekran gerçek ilan verisiyle çalışacak.
+</div>
 </div>
 
-<div id="listMode">
-<div class="title">İstanbul</div>
+<form id="pasForm">
+<div class="card">
+<div class="title">Bölge seçimi</div>
+
 <div class="segmented">
 <label class="seg"><input type="radio" name="side" value="all" checked><span>Tümü</span></label>
 <label class="seg"><input type="radio" name="side" value="anadolu"><span>Anadolu</span></label>
 <label class="seg"><input type="radio" name="side" value="avrupa"><span>Avrupa</span></label>
 </div>
 
-<div class="favorite-box">
+<div class="favorite">
 <strong>★ Favoriler</strong>
-<div class="small">Kadıköy · Beykoz · Üsküdar</div>
 <div id="favorites" class="grid" style="margin-top:8px"></div>
 </div>
 
 <details open>
 <summary>11 İlçe</summary>
-<div class="details-body"><div id="districts" class="grid"></div></div>
+<div id="districts" class="grid" style="padding-bottom:10px"></div>
 </details>
 
 <div id="neighborhoodArea"></div>
-
-<details>
-<summary>Sokak / Cadde (opsiyonel)</summary>
-<div class="details-body">
-<input id="street" name="street" type="text" placeholder="Örn: Bağdat Caddesi">
-</div>
-</details>
-</div>
-
-<div id="mapMode" class="hidden">
-<div class="warn">Haritada bir merkez seçebilirsiniz. Konum ve yarıçap PAS'ta saklanır.</div>
-<div id="map"></div>
-<div class="pair">
-<div><label class="field">Enlem</label><input id="lat" name="lat" type="text" readonly></div>
-<div><label class="field">Boylam</label><input id="lng" name="lng" type="text" readonly></div>
-</div>
-<label class="field">Yarıçap</label>
-<select id="radius" name="radius">
-<option value="1">1 km</option>
-<option value="3" selected>3 km</option>
-<option value="5">5 km</option>
-<option value="10">10 km</option>
-</select>
-</div>
 </div>
 
 <div class="card">
 <div class="title">İlan filtreleri</div>
+
 <div class="pair">
-<div><label class="field">Min m²</label><input id="min_m2" name="min_m2" type="number" min="0"></div>
-<div><label class="field">Max m²</label><input id="max_m2" name="max_m2" type="number" min="0"></div>
+<div><label class="field">Min m²</label><input name="min_m2" type="number" min="0"></div>
+<div><label class="field">Max m²</label><input name="max_m2" type="number" min="0"></div>
 </div>
+
 <div class="pair">
-<div><label class="field">Min Fiyat</label><input id="min_price" name="min_price" type="number" min="0"></div>
-<div><label class="field">Max Fiyat</label><input id="max_price" name="max_price" type="number" min="0"></div>
+<div><label class="field">Min Fiyat</label><input name="min_price" type="number" min="0"></div>
+<div><label class="field">Max Fiyat</label><input name="max_price" type="number" min="0"></div>
 </div>
+
 <details>
-<summary>Net m² satış fiyatı (opsiyonel)</summary>
-<div class="details-body pair">
-<div><label class="field">Min TL/m²</label><input id="net_m2_min" name="net_m2_min" type="number" min="0"></div>
-<div><label class="field">Max TL/m²</label><input id="net_m2_max" name="net_m2_max" type="number" min="0"></div>
+<summary>Net m² satış fiyatı</summary>
+<div class="pair" style="padding-bottom:10px">
+<div><label class="field">Min TL/m²</label><input name="net_m2_min" type="number" min="0"></div>
+<div><label class="field">Max TL/m²</label><input name="net_m2_max" type="number" min="0"></div>
 </div>
 </details>
+
 <details>
-<summary>Brüt m² satış fiyatı (opsiyonel)</summary>
-<div class="details-body pair">
-<div><label class="field">Min TL/m²</label><input id="gross_m2_min" name="gross_m2_min" type="number" min="0"></div>
-<div><label class="field">Max TL/m²</label><input id="gross_m2_max" name="gross_m2_max" type="number" min="0"></div>
+<summary>Brüt m² satış fiyatı</summary>
+<div class="pair" style="padding-bottom:10px">
+<div><label class="field">Min TL/m²</label><input name="gross_m2_min" type="number" min="0"></div>
+<div><label class="field">Max TL/m²</label><input name="gross_m2_max" type="number" min="0"></div>
 </div>
 </details>
+
 <label class="field">Oda Sayısı</label>
-<select id="rooms" name="rooms">
-<option value="">Farketmez</option><option>1+1</option><option>2+1</option><option>3+1</option><option>4+1</option><option>5+1 ve üzeri</option>
+<select name="rooms">
+<option value="">Farketmez</option>
+<option>1+1</option>
+<option>2+1</option>
+<option>3+1</option>
+<option>4+1</option>
+<option>5+1 ve üzeri</option>
 </select>
-<button class="primary" type="submit">Sahibinden Aramalarını Hazırla</button>
+
+<button class="primary" id="searchButton" type="submit">İlanları PAS'a Getir ve Analiz Et</button>
 </div>
 </form>
 
-<div class="card{% if not results %} hidden{% endif %}" id="results">
-<div class="title">Sahibinden arama bağlantıları</div>
-<div id="resultsBody">
-{% for r in results %}
-<div class="result">
-    <strong>{{ r.district }}</strong>
-    <div class="compact-links">
-    {% for link in r.links %}
-        <a class="open-link" href="{{ link.url }}">{{ link.name }} ↗</a>{% if not loop.last %}<span> · </span>{% endif %}
-    {% endfor %}
-    </div>
+<div id="errorBox" class="card hidden"><div class="error" id="errorText"></div></div>
+
+<div id="resultsCard" class="card hidden">
+<div class="title">Piyasa özeti <span class="badge" id="providerBadge"></span></div>
+<div class="metrics">
+<div class="metric"><div class="k">İlan sayısı</div><div class="v" id="mCount">-</div></div>
+<div class="metric"><div class="k">Medyan fiyat</div><div class="v" id="mMedianPrice">-</div></div>
+<div class="metric"><div class="k">Ort. fiyat</div><div class="v" id="mAvgPrice">-</div></div>
+<div class="metric"><div class="k">Medyan brüt TL/m²</div><div class="v" id="mMedianM2">-</div></div>
 </div>
-{% endfor %}
-{% if local_filters %}
-<div class="warn" style="margin-top:10px"><strong>PAS ek filtreleri:</strong><br>{{ local_filters }}</div>
-{% endif %}
+
+<div class="title" style="margin-top:16px">Mahalle karşılaştırması</div>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Bölge</th><th>İlan</th><th>Medyan fiyat</th><th>Medyan TL/m²</th></tr></thead>
+<tbody id="neighborhoodStats"></tbody>
+</table>
+</div>
+
+<div class="title" style="margin-top:16px">İlanlar</div>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Mahalle</th><th>Oda</th><th>Brüt</th><th>Net</th><th>Fiyat</th><th>Brüt TL/m²</th><th>Tarih</th></tr></thead>
+<tbody id="listingRows"></tbody>
+</table>
+</div>
 </div>
 </div>
 
-</div>
-
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="PAS_STATE_STATIC_V1";
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
-let map=null,marker=null;
 
-function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
-function slugDom(s){return s.toLocaleLowerCase("tr-TR").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g,"-")}
-function sideValue(){return document.querySelector('input[name="side"]:checked')?.value||"all"}
-function districtHtml(d){const checked=selectedDistricts.has(d.name)?"checked":"";return `<label class="check"><input class="districtCheck" type="checkbox" value="${esc(d.name)}" ${checked}><span>${esc(d.name)}${d.favorite?" ★":""}</span></label>`}
-
+function esc(s){
+ return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function fmtMoney(n){
+ if(n===null||n===undefined)return "-";
+ return new Intl.NumberFormat("tr-TR").format(n)+" ₺";
+}
+function sideValue(){
+ return document.querySelector('input[name="side"]:checked')?.value||"all";
+}
+function districtHtml(d){
+ const checked=selectedDistricts.has(d.name)?"checked":"";
+ return `<label class="check"><input class="districtCheck" type="checkbox" value="${esc(d.name)}" ${checked}><span>${esc(d.name)}${d.favorite?" ★":""}</span></label>`;
+}
 function renderDistricts(){
  const side=sideValue();
  const visible=DISTRICTS.filter(d=>side==="all"||d.side===side);
@@ -332,292 +544,199 @@ function renderDistricts(){
  document.getElementById("favorites").innerHTML=visible.filter(d=>d.favorite).map(districtHtml).join("");
  bindDistricts();
 }
-function syncCopies(name,checked){document.querySelectorAll(".districtCheck").forEach(cb=>{if(cb.value===name)cb.checked=checked})}
+function syncCopies(name,checked){
+ document.querySelectorAll(".districtCheck").forEach(cb=>{if(cb.value===name)cb.checked=checked});
+}
+function slugDom(s){
+ return s.toLocaleLowerCase("tr-TR").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g,"-");
+}
 function bindDistricts(){
  document.querySelectorAll(".districtCheck").forEach(cb=>{
   cb.onchange=()=>{
    syncCopies(cb.value,cb.checked);
    if(cb.checked){
-     selectedDistricts.add(cb.value);
-     ensureNeighborhoodBlock(cb.value);
+    selectedDistricts.add(cb.value);
+    renderNeighborhoodBlock(cb.value);
    }else{
-     selectedDistricts.delete(cb.value);
-     delete selectedNeighborhoods[cb.value];
-     document.getElementById("nb-"+slugDom(cb.value))?.remove();
+    selectedDistricts.delete(cb.value);
+    delete selectedNeighborhoods[cb.value];
+    document.getElementById("nb-"+slugDom(cb.value))?.remove();
    }
-   saveState();
+  };
+ });
+}
+function renderNeighborhoodBlock(district){
+ const id="nb-"+slugDom(district);
+ if(document.getElementById(id))return;
+ const list=NEIGHBORHOODS[district]||[];
+ const selected=new Set(selectedNeighborhoods[district]||[]);
+ const wrap=document.createElement("div");
+ wrap.className="neighborhood-box";
+ wrap.id=id;
+ wrap.innerHTML=`
+  <div class="neighborhood-head"><span>${esc(district)} mahalleleri</span><span class="small">${list.length} seçenek</span></div>
+  <div class="neighborhoods">
+   ${list.map(n=>`<label class="check"><input class="neighborhoodCheck" type="checkbox" value="${esc(n)}" ${selected.has(n)?"checked":""}><span>${esc(n)}</span></label>`).join("")}
+  </div>
+ `;
+ document.getElementById("neighborhoodArea").appendChild(wrap);
+ wrap.querySelectorAll(".neighborhoodCheck").forEach(cb=>{
+  cb.onchange=()=>{
+   selectedNeighborhoods[district]=[...wrap.querySelectorAll(".neighborhoodCheck:checked")].map(x=>x.value);
   };
  });
 }
 
-function ensureNeighborhoodBlock(district){
- const id="nb-"+slugDom(district);
- if(document.getElementById(id))return;
+document.querySelectorAll('input[name="side"]').forEach(el=>{
+ el.addEventListener("change",renderDistricts);
+});
 
- const list=NEIGHBORHOODS[district]||[];
- const selected=new Set(selectedNeighborhoods[district]||[]);
+document.getElementById("pasForm").addEventListener("submit",async e=>{
+ e.preventDefault();
+ const errorBox=document.getElementById("errorBox");
+ const resultsCard=document.getElementById("resultsCard");
+ errorBox.classList.add("hidden");
 
- const wrap=document.createElement("div");
- wrap.className="district-block";
- wrap.id=id;
- wrap.innerHTML=`
-   <div class="district-head">
-      <span>${esc(district)} mahalleleri</span>
-      <span class="count">${list.length} seçenek</span>
-   </div>
-   <div class="neighborhoods">
-      ${list.map(n=>`<label class="check"><input class="neighborhoodCheck" type="checkbox" data-district="${esc(district)}" value="${esc(n)}" ${selected.has(n)?"checked":""}><span>${esc(n)}</span></label>`).join("")}
-   </div>
- `;
- document.getElementById("neighborhoodArea").appendChild(wrap);
-
- wrap.querySelectorAll(".neighborhoodCheck").forEach(cb=>{
-   cb.onchange=()=>{
-     selectedNeighborhoods[district]=[...wrap.querySelectorAll(".neighborhoodCheck:checked")].map(x=>x.value);
-     saveState();
-   };
- });
-}
-
-function saveState(){
- const inputs={};
- ["street","min_m2","max_m2","min_price","max_price","net_m2_min","net_m2_max","gross_m2_min","gross_m2_max","rooms","lat","lng","radius"].forEach(id=>{const el=document.getElementById(id);if(el)inputs[id]=el.value});
- localStorage.setItem(STATE_KEY,JSON.stringify({mode:document.querySelector('input[name="mode"]:checked')?.value||"list",side:sideValue(),selectedDistricts:[...selectedDistricts],selectedNeighborhoods,inputs}));
-}
-function loadState(){try{return JSON.parse(localStorage.getItem(STATE_KEY)||"{}")}catch{return{}}}
-function setupMode(){
- const mode=document.querySelector('input[name="mode"]:checked')?.value||"list";
- document.getElementById("listMode").classList.toggle("hidden",mode!=="list");
- document.getElementById("mapMode").classList.toggle("hidden",mode!=="map");
- if(mode==="map"&&map)setTimeout(()=>map.invalidateSize(),100);
- saveState();
-}
-function restoreState(){
- const s=loadState();
- if(s.mode){const el=document.querySelector(`input[name="mode"][value="${s.mode}"]`);if(el)el.checked=true}
- if(s.side){const el=document.querySelector(`input[name="side"][value="${s.side}"]`);if(el)el.checked=true}
- selectedDistricts=new Set(s.selectedDistricts||[]);
- selectedNeighborhoods=s.selectedNeighborhoods||{};
- if(s.inputs)Object.entries(s.inputs).forEach(([id,value])=>{const el=document.getElementById(id);if(el&&value!=null)el.value=value});
- renderDistricts();
- [...selectedDistricts].forEach(ensureNeighborhoodBlock);
- setupMode();
-
- const lat=parseFloat(document.getElementById("lat").value),lng=parseFloat(document.getElementById("lng").value);
- if(!Number.isNaN(lat)&&!Number.isNaN(lng)&&map){
-   marker=L.marker([lat,lng]).addTo(map);
-   map.setView([lat,lng],14);
- }
-}
-function initMap(){
- if(typeof L==="undefined")return;
- map=L.map("map").setView([41.02,29.05],11);
- L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"&copy; OpenStreetMap"}).addTo(map);
- map.on("click",e=>{
-  if(marker)marker.remove();
-  marker=L.marker(e.latlng).addTo(map);
-  document.getElementById("lat").value=e.latlng.lat.toFixed(6);
-  document.getElementById("lng").value=e.latlng.lng.toFixed(6);
-  saveState();
- });
-}
-function addHidden(name,value){
- const input=document.createElement("input");
- input.type="hidden";
- input.name=name;
- input.value=value;
- input.className="dynamic-hidden";
- document.getElementById("pasForm").appendChild(input);
-}
-
-document.querySelectorAll('input[name="mode"]').forEach(el=>el.addEventListener("change",setupMode));
-document.querySelectorAll('input[name="side"]').forEach(el=>el.addEventListener("change",()=>{renderDistricts();saveState()}));
-["street","min_m2","max_m2","min_price","max_price","net_m2_min","net_m2_max","gross_m2_min","gross_m2_max","rooms","radius"].forEach(id=>document.getElementById(id)?.addEventListener("change",saveState));
-
-document.getElementById("pasForm").addEventListener("submit",async event=>{
- event.preventDefault();
-
- document.querySelectorAll(".dynamic-hidden").forEach(x=>x.remove());
- const mode=document.querySelector('input[name="mode"]:checked')?.value||"list";
-
- if(mode==="list"){
-  if(selectedDistricts.size===0){
-    alert("En az bir ilçe seçin.");
-    return;
-  }
-
-  [...selectedDistricts].forEach(d=>addHidden("districts",d));
-
-  Object.entries(selectedNeighborhoods).forEach(([district,neighborhoods])=>{
-    neighborhoods.forEach(n=>addHidden("neighborhoods",`${district}|||${n}`));
-  });
+ if(selectedDistricts.size===0){
+  document.getElementById("errorText").textContent="En az bir ilçe seçin.";
+  errorBox.classList.remove("hidden");
+  return;
  }
 
- saveState();
-
- const button=document.querySelector(".primary");
+ const button=document.getElementById("searchButton");
  const oldText=button.textContent;
  button.disabled=true;
- button.textContent="Hazırlanıyor…";
+ button.textContent="Veriler hazırlanıyor…";
+
+ const formData=new FormData(e.target);
+ const payload={
+  districts:[...selectedDistricts],
+  neighborhoods:selectedNeighborhoods,
+  rooms:formData.get("rooms")||"",
+  min_m2:formData.get("min_m2")||"",
+  max_m2:formData.get("max_m2")||"",
+  min_price:formData.get("min_price")||"",
+  max_price:formData.get("max_price")||"",
+  net_m2_min:formData.get("net_m2_min")||"",
+  net_m2_max:formData.get("net_m2_max")||"",
+  gross_m2_min:formData.get("gross_m2_min")||"",
+  gross_m2_max:formData.get("gross_m2_max")||""
+ };
 
  try{
-   const formData=new FormData(document.getElementById("pasForm"));
-   const response=await fetch("/",{
-     method:"POST",
-     body:formData,
-     headers:{"X-Requested-With":"fetch"}
-   });
+  const response=await fetch("/api/search",{
+   method:"POST",
+   headers:{"Content-Type":"application/json"},
+   body:JSON.stringify(payload)
+  });
+  const data=await response.json();
+  if(!response.ok||!data.ok)throw new Error(data.error||"Arama başarısız.");
 
-   const payload=await response.json();
-   if(!response.ok||!payload.ok){
-     throw new Error(payload.error||"Arama hazırlanamadı.");
-   }
+  document.getElementById("providerBadge").textContent=data.provider;
+  document.getElementById("mCount").textContent=data.analysis.count;
+  document.getElementById("mMedianPrice").textContent=fmtMoney(data.analysis.median_price);
+  document.getElementById("mAvgPrice").textContent=fmtMoney(data.analysis.avg_price);
+  document.getElementById("mMedianM2").textContent=fmtMoney(data.analysis.median_gross_m2_price);
 
-   const resultsBox=document.getElementById("results");
-   const resultsBody=document.getElementById("resultsBody");
+  document.getElementById("neighborhoodStats").innerHTML=
+   data.analysis.by_neighborhood.map(r=>`
+    <tr>
+     <td>${esc(r.name)}</td>
+     <td>${r.count}</td>
+     <td>${fmtMoney(r.median_price)}</td>
+     <td>${fmtMoney(r.median_gross_m2_price)}</td>
+    </tr>
+   `).join("");
 
-   resultsBody.innerHTML=payload.results.map(r=>`
-     <div class="result">
-       <strong>${esc(r.district)}</strong>
-       <div class="compact-links">
-         ${r.links.map((link,i)=>`
-           <a class="open-link" href="${esc(link.url)}">${esc(link.name)} ↗</a>${i<r.links.length-1?'<span> · </span>':''}
-         `).join("")}
-       </div>
-     </div>
-   `).join("") + (payload.local_filters ? `
-     <div class="warn" style="margin-top:10px">
-       <strong>PAS ek filtreleri:</strong><br>${esc(payload.local_filters)}
-     </div>
-   ` : "");
+  document.getElementById("listingRows").innerHTML=
+   data.listings.map(r=>`
+    <tr>
+     <td>${esc(r.district)} · ${esc(r.neighborhood)}</td>
+     <td>${esc(r.rooms)}</td>
+     <td>${r.gross_m2} m²</td>
+     <td>${r.net_m2} m²</td>
+     <td>${fmtMoney(r.price)}</td>
+     <td>${fmtMoney(r.gross_price_m2)}</td>
+     <td>${esc(r.listing_date)}</td>
+    </tr>
+   `).join("");
 
-   resultsBox.classList.remove("hidden");
+  resultsCard.classList.remove("hidden");
  }catch(err){
-   alert(err.message||"Arama hazırlanırken bir hata oluştu.");
+  document.getElementById("errorText").textContent=err.message||"Beklenmeyen hata.";
+  errorBox.classList.remove("hidden");
  }finally{
-   button.disabled=false;
-   button.textContent=oldText;
+  button.disabled=false;
+  button.textContent=oldText;
  }
 });
 
-
-document.addEventListener("click", e=>{
- const link=e.target.closest("a.open-link");
- if(!link)return;
- e.preventDefault();
- window.location.href=link.href;
-});
-
-initMap();
-restoreState();
+renderDistricts();
 </script>
 </body>
 </html>
 """
 
-@app.route("/", methods=["GET", "POST"])
+
+@app.get("/")
 def home():
-    results = []
-    local_filters = ""
-
-    if request.method == "POST":
-        mode = request.form.get("mode", "list")
-        street = request.form.get("street", "").strip()
-        min_m2 = request.form.get("min_m2", "").strip()
-        max_m2 = request.form.get("max_m2", "").strip()
-        min_price = request.form.get("min_price", "").strip()
-        max_price = request.form.get("max_price", "").strip()
-        net_m2_min = request.form.get("net_m2_min", "").strip()
-        net_m2_max = request.form.get("net_m2_max", "").strip()
-        gross_m2_min = request.form.get("gross_m2_min", "").strip()
-        gross_m2_max = request.form.get("gross_m2_max", "").strip()
-        rooms = request.form.get("rooms", "").strip()
-
-        local_parts = []
-        if min_m2 or max_m2:
-            local_parts.append(f"Alan: {min_m2 or '-'} – {max_m2 or '-'} m²")
-        if net_m2_min or net_m2_max:
-            local_parts.append(f"Net: {net_m2_min or '-'} – {net_m2_max or '-'} TL/m²")
-        if gross_m2_min or gross_m2_max:
-            local_parts.append(f"Brüt: {gross_m2_min or '-'} – {gross_m2_max or '-'} TL/m²")
-        if rooms:
-            local_parts.append(f"Oda: {rooms}")
-        local_filters = " | ".join(local_parts)
-
-        if mode == "list":
-            districts = request.form.getlist("districts")
-            raw = request.form.getlist("neighborhoods")
-            by_district = {d: [] for d in districts}
-
-            for item in raw:
-                if "|||" not in item:
-                    continue
-                district, neighborhood = item.split("|||", 1)
-                if district in by_district:
-                    by_district[district].append(neighborhood)
-
-            for district in districts:
-                neighborhoods = by_district.get(district, [])
-                links = []
-
-                if neighborhoods:
-                    for neighborhood in neighborhoods:
-                        links.append({
-                            "name": neighborhood,
-                            "url": sahibinden_url(
-                                district,
-                                neighborhood,
-                                street,
-                                min_price,
-                                max_price,
-                            ),
-                        })
-                else:
-                    links.append({
-                        "name": "İlçe genelinde aç",
-                        "url": sahibinden_url(
-                            district,
-                            "",
-                            street,
-                            min_price,
-                            max_price,
-                        ),
-                    })
-
-                results.append({
-                    "district": district,
-                    "neighborhoods": neighborhoods,
-                    "links": links,
-                })
-
-        else:
-            lat = request.form.get("lat", "").strip()
-            lng = request.form.get("lng", "").strip()
-            radius = request.form.get("radius", "3").strip()
-
-            results.append({
-                "district": "Harita seçimi",
-                "neighborhoods": [f"{lat or '-'}, {lng or '-'} · {radius} km"],
-                "links": [{
-                    "name": "Sahibinden'de aç",
-                    "url": "https://www.sahibinden.com/satilik-daire/istanbul",
-                }],
-            })
-
-    if request.headers.get("X-Requested-With") == "fetch":
-        return jsonify({
-            "ok": True,
-            "results": results,
-            "local_filters": local_filters,
-        })
-
     return render_template_string(
         PAGE,
-        results=results,
-        local_filters=local_filters,
         districts_json=json.dumps(DISTRICTS, ensure_ascii=False),
         neighborhoods_json=json.dumps(NEIGHBORHOODS, ensure_ascii=False),
     )
+
+
+@app.post("/api/search")
+def api_search():
+    try:
+        payload = request.get_json(silent=True) or {}
+        districts = payload.get("districts") or []
+
+        allowed = {d["name"] for d in DISTRICTS}
+        districts = [d for d in districts if d in allowed]
+
+        if not districts:
+            return jsonify({"ok": False, "error": "Geçerli bir ilçe seçilmedi."}), 400
+
+        raw_neighborhoods = payload.get("neighborhoods") or {}
+        neighborhoods = {}
+
+        for district in districts:
+            allowed_nbs = set(NEIGHBORHOODS.get(district, []))
+            requested = raw_neighborhoods.get(district) or []
+            neighborhoods[district] = [n for n in requested if n in allowed_nbs]
+
+        filters = {
+            "districts": districts,
+            "neighborhoods": neighborhoods,
+            "rooms": payload.get("rooms", ""),
+            "min_m2": payload.get("min_m2", ""),
+            "max_m2": payload.get("max_m2", ""),
+            "min_price": payload.get("min_price", ""),
+            "max_price": payload.get("max_price", ""),
+            "net_m2_min": payload.get("net_m2_min", ""),
+            "net_m2_max": payload.get("net_m2_max", ""),
+            "gross_m2_min": payload.get("gross_m2_min", ""),
+            "gross_m2_max": payload.get("gross_m2_max", ""),
+        }
+
+        listings = PROVIDER.search(filters)
+        analysis = analyze(listings)
+
+        return jsonify({
+            "ok": True,
+            "provider": PROVIDER.name,
+            "analysis": analysis,
+            "listings": [x.to_dict() for x in listings],
+        })
+
+    except Exception as exc:
+        return jsonify({
+            "ok": False,
+            "error": f"Veri hazırlanırken hata oluştu: {exc}"
+        }), 500
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
