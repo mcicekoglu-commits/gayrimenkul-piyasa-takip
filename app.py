@@ -5,6 +5,9 @@ import math
 import random
 import statistics
 import unicodedata
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 from dataclasses import dataclass, asdict
 from datetime import date, timedelta
 
@@ -258,26 +261,145 @@ class DemoListingProvider(ListingProvider):
 
 class AuthorizedSahibindenProvider(ListingProvider):
     """
-    YETKİLİ API BAĞLANTISI İÇİN HAZIR NOKTA.
+    Yetkili Sahibinden API bağlantısı için production-ready iskelet.
 
-    Gerçek API erişimin olduğunda:
-      1) Bu sınıfa kimlik doğrulama bilgileri eklenecek.
-      2) Sahibinden'in izin verdiği endpoint çağrılacak.
-      3) Dönen alanlar Listing nesnesine normalize edilecek.
-      4) PROVIDER aşağıda bu sınıfa çevrilecek.
-
-    Koruma aşma / izinsiz scraping burada uygulanmıyor.
+    Railway Variables:
+      PAS_PROVIDER=authorized_sahibinden
+      SAHIBINDEN_API_BASE_URL=https://...
+      SAHIBINDEN_API_KEY=...
+      SAHIBINDEN_API_AUTH_SCHEME=Bearer
+      SAHIBINDEN_API_SEARCH_PATH=/...
+      SAHIBINDEN_API_TIMEOUT=15
     """
 
     name = "authorized_sahibinden"
 
-    def search(self, filters):
-        raise RuntimeError(
-            "Yetkili Sahibinden API bağlantısı henüz yapılandırılmadı."
+    def __init__(self):
+        self.base_url = os.environ.get("SAHIBINDEN_API_BASE_URL", "").strip().rstrip("/")
+        self.api_key = os.environ.get("SAHIBINDEN_API_KEY", "").strip()
+        self.auth_scheme = os.environ.get("SAHIBINDEN_API_AUTH_SCHEME", "Bearer").strip()
+        self.search_path = os.environ.get("SAHIBINDEN_API_SEARCH_PATH", "").strip()
+        self.timeout = parse_int(os.environ.get("SAHIBINDEN_API_TIMEOUT")) or 15
+
+    def configured(self):
+        return bool(self.base_url and self.api_key and self.search_path)
+
+    def _headers(self):
+        return {
+            "Accept": "application/json",
+            "Authorization": f"{self.auth_scheme} {self.api_key}".strip(),
+            "User-Agent": "PAS/1.0",
+        }
+
+    def _request_json(self, url):
+        req = Request(url, headers=self._headers(), method="GET")
+        try:
+            with urlopen(req, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            raise RuntimeError(f"Sahibinden API HTTP hatası: {exc.code}") from exc
+        except URLError as exc:
+            raise RuntimeError("Sahibinden API bağlantısı kurulamadı.") from exc
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Sahibinden API geçersiz JSON döndürdü.") from exc
+
+    def _build_query(self, filters):
+        params = {}
+        districts = filters.get("districts") or []
+        neighborhoods = filters.get("neighborhoods") or {}
+
+        if districts:
+            params["districts"] = ",".join(districts)
+
+        flat_neighborhoods = []
+        for district in districts:
+            for nb in neighborhoods.get(district) or []:
+                flat_neighborhoods.append(f"{district}:{nb}")
+        if flat_neighborhoods:
+            params["neighborhoods"] = "|".join(flat_neighborhoods)
+
+        for key in [
+            "rooms", "min_m2", "max_m2", "min_price", "max_price",
+            "net_m2_min", "net_m2_max", "gross_m2_min", "gross_m2_max",
+        ]:
+            value = filters.get(key)
+            if value not in (None, ""):
+                params[key] = value
+
+        return params
+
+    def _normalize_item(self, item):
+        def first(*keys, default=None):
+            for key in keys:
+                if key in item and item.get(key) not in (None, ""):
+                    return item.get(key)
+            return default
+
+        district = str(first("district", "districtName", "ilce", default="")).strip()
+        neighborhood = str(first("neighborhood", "neighborhoodName", "mahalle", default="")).strip()
+        title = str(first("title", "listingTitle", "baslik", default="İlan")).strip()
+        price = parse_int(first("price", "salePrice", "fiyat"))
+        gross_m2 = parse_int(first("grossM2", "gross_m2", "brutM2", "areaGross"))
+        net_m2 = parse_int(first("netM2", "net_m2", "netM2Value", "areaNet"))
+        rooms = str(first("rooms", "roomCount", "oda", default="")).strip()
+        listing_date = str(first("listingDate", "date", "createdAt", "ilanTarihi", default=date.today().isoformat()))[:10]
+        listing_id = str(first("id", "listingId", "ilanNo", default=stable_seed(title + district)))
+
+        if not district or not neighborhood or not price or not gross_m2 or not net_m2:
+            return None
+
+        return Listing(
+            id=listing_id,
+            district=district,
+            neighborhood=neighborhood,
+            title=title,
+            price=price,
+            gross_m2=gross_m2,
+            net_m2=net_m2,
+            rooms=rooms,
+            listing_date=listing_date,
+            source=self.name,
         )
 
+    def search(self, filters):
+        if not self.configured():
+            raise RuntimeError(
+                "Yetkili Sahibinden API yapılandırması eksik. "
+                "Railway Variables'a SAHIBINDEN_API_BASE_URL, "
+                "SAHIBINDEN_API_KEY ve SAHIBINDEN_API_SEARCH_PATH eklenmeli."
+            )
 
-PROVIDER = DemoListingProvider()
+        url = f"{self.base_url}/{self.search_path.lstrip('/')}"
+        params = self._build_query(filters)
+        if params:
+            url += "?" + urlencode(params)
+
+        payload = self._request_json(url)
+        raw_items = (
+            payload.get("data")
+            or payload.get("items")
+            or payload.get("listings")
+            or payload.get("results")
+            or []
+        )
+
+        listings = []
+        for item in raw_items:
+            if isinstance(item, dict):
+                normalized = self._normalize_item(item)
+                if normalized:
+                    listings.append(normalized)
+        return listings
+
+
+def build_provider():
+    mode = os.environ.get("PAS_PROVIDER", "demo").strip().lower()
+    if mode == "authorized_sahibinden":
+        return AuthorizedSahibindenProvider()
+    return DemoListingProvider()
+
+
+PROVIDER = build_provider()
 
 
 def parse_int(value):
@@ -364,6 +486,20 @@ def analyze(listings):
     }
 
 
+def provider_status():
+    if isinstance(PROVIDER, AuthorizedSahibindenProvider):
+        return {
+            "mode": "authorized_sahibinden",
+            "configured": PROVIDER.configured(),
+            "label": "Sahibinden yetkili API",
+        }
+    return {
+        "mode": "demo",
+        "configured": True,
+        "label": "Demo veri",
+    }
+
+
 PAGE = r"""
 <!doctype html>
 <html lang="tr">
@@ -422,8 +558,14 @@ th{font-size:12px;color:#6b7280}
 
 <div class="card">
 <div class="notice">
-<strong>Veri sağlayıcı:</strong> Demo veri modu.
-Arayüz ve analiz motoru hazır; yetkili Sahibinden API erişimi bağlandığında aynı ekran gerçek ilan verisiyle çalışacak.
+<strong>Veri sağlayıcı:</strong> {{ provider_status.label }}.
+{% if provider_status.mode == "demo" %}
+Şu an demo veri kullanılıyor. Yetkili Sahibinden API erişimi geldiğinde Railway Variables üzerinden gerçek veri moduna geçilecek.
+{% elif provider_status.configured %}
+Yetkili Sahibinden API yapılandırması aktif.
+{% else %}
+Yetkili Sahibinden API modu seçili ancak erişim bilgileri eksik.
+{% endif %}
 </div>
 </div>
 
@@ -694,6 +836,7 @@ def home():
         PAGE,
         districts_json=json.dumps(DISTRICTS, ensure_ascii=False),
         neighborhoods_json=json.dumps(NEIGHBORHOODS, ensure_ascii=False),
+        provider_status=provider_status(),
     )
 
 
@@ -746,6 +889,15 @@ def api_search():
             "ok": False,
             "error": f"Veri hazırlanırken hata oluştu: {exc}"
         }), 500
+
+
+
+@app.get("/api/provider-status")
+def api_provider_status():
+    return jsonify({
+        "ok": True,
+        **provider_status(),
+    })
 
 
 if __name__ == "__main__":
