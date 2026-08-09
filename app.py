@@ -190,14 +190,25 @@ summary{padding:11px 0;font-weight:700;cursor:pointer}
 <div class="subtitle">Piyasa Arama Sistemi</div>
 
 {% if results %}
-<div class="card">
+<div class="card" id="results">
     <div class="title">Sahibinden arama bağlantıları</div>
+
     {% for r in results %}
     <div class="result">
-        <strong>{{ r.title }}</strong>
-        <a href="{{ r.url }}" target="_blank" rel="noopener">Sahibinden'de aç</a>
+        <strong>{{ r.district }}</strong>
+
+        <div class="small" style="margin-top:6px">
+            {{ r.neighborhoods|join(" · ") if r.neighborhoods else "İlçe geneli" }}
+        </div>
+
+        {% for link in r.links %}
+        <a href="{{ link.url }}" target="_blank" rel="noopener">
+            {{ link.name }}
+        </a>
+        {% endfor %}
     </div>
     {% endfor %}
+
     {% if local_filters %}
     <div class="warn" style="margin-top:10px">
         <strong>PAS ek filtreleri:</strong><br>{{ local_filters }}
@@ -529,7 +540,7 @@ def home():
             parts.append(f"Oda: {rooms}")
         local_filters = " | ".join(parts)
 
-        if mode == "list":
+                if mode == "list":
             districts = request.form.getlist("districts")
             raw = request.form.getlist("neighborhoods")
             by_district = {d: [] for d in districts}
@@ -542,24 +553,38 @@ def home():
                     by_district[district].append(neighborhood)
 
             for district in districts:
-                neighborhoods = by_district.get(district) or [""]
-                for neighborhood in neighborhoods:
-                    title = district
-                    if neighborhood:
-                        title += f" · {neighborhood}"
-                    if street:
-                        title += f" · {street}"
+                neighborhoods = by_district.get(district) or []
 
-                    results.append({
-                        "title": title,
+                links = []
+                if neighborhoods:
+                    for neighborhood in neighborhoods:
+                        links.append({
+                            "name": neighborhood,
+                            "url": sahibinden_url(
+                                district,
+                                neighborhood,
+                                street,
+                                min_price,
+                                max_price,
+                            ),
+                        })
+                else:
+                    links.append({
+                        "name": "İlçe genelinde aç",
                         "url": sahibinden_url(
                             district,
-                            neighborhood,
+                            "",
                             street,
                             min_price,
                             max_price,
                         ),
                     })
+
+                results.append({
+                    "district": district,
+                    "neighborhoods": neighborhoods,
+                    "links": links,
+                })
         else:
             lat = request.form.get("lat", "").strip()
             lng = request.form.get("lng", "").strip()
@@ -568,10 +593,7 @@ def home():
                 "title": f"Harita seçimi: {lat or '-'}, {lng or '-'} · {radius} km",
                 "url": "https://www.sahibinden.com/satilik-daire/istanbul",
             })
-    if request.method == "POST" and len(results) == 1:
-        return redirect(results[0]["url"])
-
-    return render_template_string(
+        return render_template_string(
         PAGE,
         results=results,
         local_filters=local_filters,
@@ -583,3 +605,4 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
+
