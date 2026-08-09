@@ -176,7 +176,20 @@ summary{padding:11px 0;font-weight:700}
 .result-links{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}
 .result-links a{display:inline-block;padding:10px;border-radius:8px;background:#181818;color:#fff;text-align:center;text-decoration:none;font-weight:700}
 .compact-links{margin-top:6px;font-size:14px;line-height:1.7}
-.compact-links a{color:#4b5563;text-decoration:none;font-weight:600}
+.compact-links a{
+  display:inline-block;
+  color:#111827;
+  background:#f3f4f6;
+  border:1px solid #d1d5db;
+  border-radius:8px;
+  padding:7px 10px;
+  margin:3px 2px 3px 0;
+  text-decoration:none;
+  font-weight:700;
+  -webkit-tap-highlight-color:rgba(0,0,0,.08);
+  touch-action:manipulation;
+  cursor:pointer;
+}
 .compact-links span{color:#9ca3af}
 
 .count{font-size:12px;color:#6b7280;font-weight:400}
@@ -285,7 +298,7 @@ summary{padding:11px 0;font-weight:700}
     <strong>{{ r.district }}</strong>
     <div class="compact-links">
     {% for link in r.links %}
-        <a href="{{ link.url }}" target="_blank" rel="noopener">{{ link.name }}</a>{% if not loop.last %}<span> · </span>{% endif %}
+        <a class="open-link" href="{{ link.url }}">{{ link.name }} ↗</a>{% if not loop.last %}<span> · </span>{% endif %}
     {% endfor %}
     </div>
 </div>
@@ -468,7 +481,7 @@ document.getElementById("pasForm").addEventListener("submit",async event=>{
        <strong>${esc(r.district)}</strong>
        <div class="compact-links">
          ${r.links.map((link,i)=>`
-           <a href="${esc(link.url)}" target="_blank" rel="noopener">${esc(link.name)}</a>${i<r.links.length-1?'<span> · </span>':''}
+           <a class="open-link" href="${esc(link.url)}">${esc(link.name)} ↗</a>${i<r.links.length-1?'<span> · </span>':''}
          `).join("")}
        </div>
      </div>
@@ -485,6 +498,14 @@ document.getElementById("pasForm").addEventListener("submit",async event=>{
    button.disabled=false;
    button.textContent=oldText;
  }
+});
+
+
+document.addEventListener("click", e=>{
+ const link=e.target.closest("a.open-link");
+ if(!link)return;
+ e.preventDefault();
+ window.location.href=link.href;
 });
 
 initMap();
