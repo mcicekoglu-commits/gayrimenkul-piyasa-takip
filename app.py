@@ -4,7 +4,7 @@ import json
 import unicodedata
 from urllib.parse import urlencode, quote
 
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, jsonify
 
 app = Flask(__name__)
 
@@ -277,9 +277,9 @@ summary{padding:11px 0;font-weight:700}
 </div>
 </form>
 
-{% if results %}
-<div class="card" id="results">
+<div class="card{% if not results %} hidden{% endif %}" id="results">
 <div class="title">Sahibinden arama bağlantıları</div>
+<div id="resultsBody">
 {% for r in results %}
 <div class="result">
     <strong>{{ r.district }}</strong>
@@ -294,7 +294,7 @@ summary{padding:11px 0;font-weight:700}
 <div class="warn" style="margin-top:10px"><strong>PAS ek filtreleri:</strong><br>{{ local_filters }}</div>
 {% endif %}
 </div>
-{% endif %}
+</div>
 
 </div>
 
@@ -421,13 +421,14 @@ document.querySelectorAll('input[name="mode"]').forEach(el=>el.addEventListener(
 document.querySelectorAll('input[name="side"]').forEach(el=>el.addEventListener("change",()=>{renderDistricts();saveState()}));
 ["street","min_m2","max_m2","min_price","max_price","net_m2_min","net_m2_max","gross_m2_min","gross_m2_max","rooms","radius"].forEach(id=>document.getElementById(id)?.addEventListener("change",saveState));
 
-document.getElementById("pasForm").addEventListener("submit",event=>{
+document.getElementById("pasForm").addEventListener("submit",async event=>{
+ event.preventDefault();
+
  document.querySelectorAll(".dynamic-hidden").forEach(x=>x.remove());
  const mode=document.querySelector('input[name="mode"]:checked')?.value||"list";
 
  if(mode==="list"){
   if(selectedDistricts.size===0){
-    event.preventDefault();
     alert("En az bir ilçe seçin.");
     return;
   }
@@ -439,20 +440,55 @@ document.getElementById("pasForm").addEventListener("submit",event=>{
   });
  }
 
- sessionStorage.setItem("PAS_SCROLL_Y", String(window.scrollY));
  saveState();
+
+ const button=document.querySelector(".primary");
+ const oldText=button.textContent;
+ button.disabled=true;
+ button.textContent="Hazırlanıyor…";
+
+ try{
+   const formData=new FormData(document.getElementById("pasForm"));
+   const response=await fetch("/",{
+     method:"POST",
+     body:formData,
+     headers:{"X-Requested-With":"fetch"}
+   });
+
+   const payload=await response.json();
+   if(!response.ok||!payload.ok){
+     throw new Error(payload.error||"Arama hazırlanamadı.");
+   }
+
+   const resultsBox=document.getElementById("results");
+   const resultsBody=document.getElementById("resultsBody");
+
+   resultsBody.innerHTML=payload.results.map(r=>`
+     <div class="result">
+       <strong>${esc(r.district)}</strong>
+       <div class="compact-links">
+         ${r.links.map((link,i)=>`
+           <a href="${esc(link.url)}" target="_blank" rel="noopener">${esc(link.name)}</a>${i<r.links.length-1?'<span> · </span>':''}
+         `).join("")}
+       </div>
+     </div>
+   `).join("") + (payload.local_filters ? `
+     <div class="warn" style="margin-top:10px">
+       <strong>PAS ek filtreleri:</strong><br>${esc(payload.local_filters)}
+     </div>
+   ` : "");
+
+   resultsBox.classList.remove("hidden");
+ }catch(err){
+   alert(err.message||"Arama hazırlanırken bir hata oluştu.");
+ }finally{
+   button.disabled=false;
+   button.textContent=oldText;
+ }
 });
 
 initMap();
 restoreState();
-
-const savedScrollY = sessionStorage.getItem("PAS_SCROLL_Y");
-if(savedScrollY !== null){
-    sessionStorage.removeItem("PAS_SCROLL_Y");
-    requestAnimationFrame(() => {
-        window.scrollTo(0, Number(savedScrollY) || 0);
-    });
-}
 </script>
 </body>
 </html>
@@ -546,6 +582,13 @@ def home():
                     "url": "https://www.sahibinden.com/satilik-daire/istanbul",
                 }],
             })
+
+    if request.headers.get("X-Requested-With") == "fetch":
+        return jsonify({
+            "ok": True,
+            "results": results,
+            "local_filters": local_filters,
+        })
 
     return render_template_string(
         PAGE,
