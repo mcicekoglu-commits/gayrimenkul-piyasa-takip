@@ -678,8 +678,10 @@ renderDistricts();
 """
 
 
-@app.get("/")
+@app.route("/", methods=["GET", "POST"])
 def home():
+    # Eski tarayıcı önbelleğinde kalan POST / istekleri 405 vermesin.
+    # Her iki durumda da güncel PAS arayüzünü göster.
     return render_template_string(
         PAGE,
         districts_json=json.dumps(DISTRICTS, ensure_ascii=False),
