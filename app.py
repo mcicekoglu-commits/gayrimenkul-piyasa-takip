@@ -150,11 +150,17 @@ PAGE = """
         </form>
 
         {% if searched %}
-        <div class="note">
-            Arama ekranı çalışıyor. Bir sonraki aşamada gerçek ilan verilerini
-            ve yakın ilan mesafelerini buraya bağlayacağız.
-        </div>
-        {% endif %}
+<div class="note">
+    <strong>Arama kriterleri:</strong><br><br>
+    İl: {{ kriterler.il }}<br>
+    İlçe: {{ kriterler.ilce }}<br>
+    Mahalle: {{ kriterler.mahalle }}<br>
+    Sokak: {{ kriterler.sokak or "Belirtilmedi" }}<br>
+    m²: {{ kriterler.min_m2 or "-" }} - {{ kriterler.max_m2 or "-" }}<br>
+    Fiyat: {{ kriterler.min_fiyat or "-" }} - {{ kriterler.max_fiyat or "-" }}<br>
+    Oda: {{ kriterler.oda or "Farketmez" }}
+</div>
+{% endif %}
 
     </div>
 </div>
@@ -165,7 +171,24 @@ PAGE = """
 @app.route("/", methods=["GET", "POST"])
 def home():
     searched = request.method == "POST"
-    return render_template_string(PAGE, searched=searched)
+
+    kriterler = {
+        "il": request.form.get("il", ""),
+        "ilce": request.form.get("ilce", ""),
+        "mahalle": request.form.get("mahalle", ""),
+        "sokak": request.form.get("sokak", ""),
+        "min_m2": request.form.get("min_m2", ""),
+        "max_m2": request.form.get("max_m2", ""),
+        "min_fiyat": request.form.get("min_fiyat", ""),
+        "max_fiyat": request.form.get("max_fiyat", ""),
+        "oda": request.form.get("oda", "")
+    }
+
+    return render_template_string(
+        PAGE,
+        searched=searched,
+        kriterler=kriterler
+    )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
