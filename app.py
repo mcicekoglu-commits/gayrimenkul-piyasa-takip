@@ -187,29 +187,7 @@ summary{padding:11px 0;font-weight:700}
 <h1>PAS</h1>
 <div class="subtitle">Piyasa Arama Sistemi</div>
 
-{% if results %}
-<div class="card" id="results">
-<div class="title">Sahibinden arama bağlantıları</div>
-{% for r in results %}
-<div class="result">
-    <strong>{{ r.district }}</strong>
-    <div class="small" style="margin-top:6px">
-        {{ r.neighborhoods|join(" · ") if r.neighborhoods else "İlçe geneli" }}
-    </div>
-    <div class="result-links">
-    {% for link in r.links %}
-        <a href="{{ link.url }}" target="_blank" rel="noopener">{{ link.name }}</a>
-    {% endfor %}
-    </div>
-</div>
-{% endfor %}
-{% if local_filters %}
-<div class="warn" style="margin-top:10px"><strong>PAS ek filtreleri:</strong><br>{{ local_filters }}</div>
-{% endif %}
-</div>
-{% endif %}
-
-<form method="post" action="/" id="pasForm">
+<form method="post" action="/#results" id="pasForm">
 <div class="card">
 <div class="title">Arama yöntemi</div>
 <div class="segmented two">
@@ -294,6 +272,29 @@ summary{padding:11px 0;font-weight:700}
 <button class="primary" type="submit">Sahibinden Aramalarını Hazırla</button>
 </div>
 </form>
+
+{% if results %}
+<div class="card" id="results">
+<div class="title">Sahibinden arama bağlantıları</div>
+{% for r in results %}
+<div class="result">
+    <strong>{{ r.district }}</strong>
+    <div class="small" style="margin-top:6px">
+        {{ r.neighborhoods|join(" · ") if r.neighborhoods else "İlçe geneli" }}
+    </div>
+    <div class="result-links">
+    {% for link in r.links %}
+        <a href="{{ link.url }}" target="_blank" rel="noopener">{{ link.name }}</a>
+    {% endfor %}
+    </div>
+</div>
+{% endfor %}
+{% if local_filters %}
+<div class="warn" style="margin-top:10px"><strong>PAS ek filtreleri:</strong><br>{{ local_filters }}</div>
+{% endif %}
+</div>
+{% endif %}
+
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -437,22 +438,11 @@ document.getElementById("pasForm").addEventListener("submit",event=>{
   });
  }
 
- sessionStorage.setItem("PAS_RETURN_TO_SEARCH_BUTTON", "1");
  saveState();
 });
 
 initMap();
 restoreState();
-
-if(sessionStorage.getItem("PAS_RETURN_TO_SEARCH_BUTTON") === "1"){
-    sessionStorage.removeItem("PAS_RETURN_TO_SEARCH_BUTTON");
-    requestAnimationFrame(() => {
-        document.querySelector(".primary")?.scrollIntoView({
-            behavior: "auto",
-            block: "center"
-        });
-    });
-}
 </script>
 </body>
 </html>
