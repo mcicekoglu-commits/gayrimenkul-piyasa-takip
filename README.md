@@ -1,0 +1,1 @@
+Gayrimenkul piyasa takip sistemi
