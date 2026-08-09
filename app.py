@@ -540,51 +540,51 @@ def home():
             parts.append(f"Oda: {rooms}")
         local_filters = " | ".join(parts)
 
-                if mode == "list":
-            districts = request.form.getlist("districts")
-            raw = request.form.getlist("neighborhoods")
-            by_district = {d: [] for d in districts}
+     if mode == "list":
+        districts = request.form.getlist("district")
+        raw = request.form.getlist("neighborhood")
+        by_district = {d: [] for d in districts}
 
-            for item in raw:
-                if "|||" not in item:
-                    continue
-                district, neighborhood = item.split("|||", 1)
-                if district in by_district:
-                    by_district[district].append(neighborhood)
+        for item in raw:
+            if "|||" not in item:
+                continue
+            district, neighborhood = item.split("|||", 1)
+            if district in by_district:
+                by_district[district].append(neighborhood)
 
-            for district in districts:
-                neighborhoods = by_district.get(district) or []
+        for district in districts:
+            neighborhoods = by_district.get(district, [])
 
-                links = []
-                if neighborhoods:
-                    for neighborhood in neighborhoods:
-                        links.append({
-                            "name": neighborhood,
-                            "url": sahibinden_url(
-                                district,
-                                neighborhood,
-                                street,
-                                min_price,
-                                max_price,
-                            ),
-                        })
-                else:
+            links = []
+            if neighborhoods:
+                for neighborhood in neighborhoods:
                     links.append({
-                        "name": "İlçe genelinde aç",
+                        "name": neighborhood,
                         "url": sahibinden_url(
                             district,
-                            "",
+                            neighborhood,
                             street,
                             min_price,
                             max_price,
                         ),
                     })
-
-                results.append({
-                    "district": district,
-                    "neighborhoods": neighborhoods,
-                    "links": links,
+            else:
+                links.append({
+                    "name": "İlçe genelinde aç",
+                    "url": sahibinden_url(
+                        district,
+                        "",
+                        street,
+                        min_price,
+                        max_price,
+                    ),
                 })
+
+            results.append({
+                "district": district,
+                "neighborhoods": neighborhoods,
+                "links": links,
+            })
         else:
             lat = request.form.get("lat", "").strip()
             lng = request.form.get("lng", "").strip()
