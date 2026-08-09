@@ -685,10 +685,8 @@ olarak saklar.
 </strong>
 
 <div class="small">
-    Kadıköy · Beykoz · Üsküdar
-</div>
-
-<div
+const ISTANBUL_DISTRICTS_API =
+"https://api.turkiyeapi.dev/v2/districts?provinceId=34&fields=id,name&sort=name&limit=100";
     id="favoriteDistricts"
     class="grid-checks"
     style="margin-top:9px;"
@@ -1496,12 +1494,8 @@ async function fetchNeighborhoods(
 
 
     const url =
-
-        `https://api.turkiyeapi.dev/v2/districts/${id}/neighborhoods`
-
-        +
-
-        `?fields=id,name&sort=name&limit=1000`;
+    `https://api.turkiyeapi.dev/v2/districts/${id}/neighborhoods` +
+    `?fields=id,name&limit=1000`;
 
 
     const res =
