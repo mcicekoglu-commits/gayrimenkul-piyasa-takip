@@ -318,6 +318,8 @@ def analyze(listings):
             "avg_price": None,
             "median_gross_m2_price": None,
             "avg_gross_m2_price": None,
+            "median_net_m2_price": None,
+            "avg_net_m2_price": None,
             "q1_gross_m2_price": None,
             "q3_gross_m2_price": None,
             "by_neighborhood": [],
@@ -325,6 +327,7 @@ def analyze(listings):
 
     prices = [x.price for x in listings]
     m2s = [x.gross_price_m2 for x in listings if x.gross_price_m2]
+    net_m2s = [x.net_price_m2 for x in listings if x.net_price_m2]
 
     grouped = {}
     for x in listings:
@@ -353,6 +356,8 @@ def analyze(listings):
         "avg_price": round(statistics.mean(prices)),
         "median_gross_m2_price": round(statistics.median(m2s)),
         "avg_gross_m2_price": round(statistics.mean(m2s)),
+        "median_net_m2_price": round(statistics.median(net_m2s)),
+        "avg_net_m2_price": round(statistics.mean(net_m2s)),
         "q1_gross_m2_price": percentile(m2s, 0.25),
         "q3_gross_m2_price": percentile(m2s, 0.75),
         "by_neighborhood": by_neighborhood,
@@ -497,6 +502,7 @@ Arayüz ve analiz motoru hazır; yetkili Sahibinden API erişimi bağlandığın
 <div class="metric"><div class="k">Medyan fiyat</div><div class="v" id="mMedianPrice">-</div></div>
 <div class="metric"><div class="k">Ort. fiyat</div><div class="v" id="mAvgPrice">-</div></div>
 <div class="metric"><div class="k">Medyan brüt TL/m²</div><div class="v" id="mMedianM2">-</div></div>
+<div class="metric"><div class="k">Medyan net TL/m²</div><div class="v" id="mMedianNetM2">-</div></div>
 </div>
 
 <div class="title" style="margin-top:16px">Mahalle karşılaştırması</div>
@@ -510,7 +516,7 @@ Arayüz ve analiz motoru hazır; yetkili Sahibinden API erişimi bağlandığın
 <div class="title" style="margin-top:16px">İlanlar</div>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Mahalle</th><th>Oda</th><th>Brüt</th><th>Net</th><th>Fiyat</th><th>Brüt TL/m²</th><th>Tarih</th></tr></thead>
+<thead><tr><th>Mahalle</th><th>Oda</th><th>Brüt</th><th>Net</th><th>Fiyat</th><th>Brüt TL/m²</th><th>Net TL/m²</th><th>Tarih</th></tr></thead>
 <tbody id="listingRows"></tbody>
 </table>
 </div>
@@ -637,6 +643,7 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
   document.getElementById("mMedianPrice").textContent=fmtMoney(data.analysis.median_price);
   document.getElementById("mAvgPrice").textContent=fmtMoney(data.analysis.avg_price);
   document.getElementById("mMedianM2").textContent=fmtMoney(data.analysis.median_gross_m2_price);
+  document.getElementById("mMedianNetM2").textContent=fmtMoney(data.analysis.median_net_m2_price);
 
   document.getElementById("neighborhoodStats").innerHTML=
    data.analysis.by_neighborhood.map(r=>`
@@ -657,6 +664,7 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
      <td>${r.net_m2} m²</td>
      <td>${fmtMoney(r.price)}</td>
      <td>${fmtMoney(r.gross_price_m2)}</td>
+     <td>${fmtMoney(r.net_price_m2)}</td>
      <td>${esc(r.listing_date)}</td>
     </tr>
    `).join("");
