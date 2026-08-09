@@ -209,7 +209,7 @@ summary{padding:11px 0;font-weight:700}
 </div>
 {% endif %}
 
-<form method="post" action="/#results" id="pasForm">
+<form method="post" action="/" id="pasForm">
 <div class="card">
 <div class="title">Arama yöntemi</div>
 <div class="segmented two">
@@ -437,11 +437,22 @@ document.getElementById("pasForm").addEventListener("submit",event=>{
   });
  }
 
+ sessionStorage.setItem("PAS_RETURN_TO_SEARCH_BUTTON", "1");
  saveState();
 });
 
 initMap();
 restoreState();
+
+if(sessionStorage.getItem("PAS_RETURN_TO_SEARCH_BUTTON") === "1"){
+    sessionStorage.removeItem("PAS_RETURN_TO_SEARCH_BUTTON");
+    requestAnimationFrame(() => {
+        document.querySelector(".primary")?.scrollIntoView({
+            behavior: "auto",
+            block: "center"
+        });
+    });
+}
 </script>
 </body>
 </html>
