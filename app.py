@@ -486,6 +486,48 @@ def analyze(listings):
     }
 
 
+def opportunity_analysis(listings):
+    """Mahalle medyanlarına göre karşılaştırmalı PAS fırsat göstergesi."""
+    if not listings:
+        return []
+
+    groups = {}
+    for item in listings:
+        groups.setdefault((item.district, item.neighborhood), []).append(item)
+
+    result = []
+    for item in listings:
+        peers = groups[(item.district, item.neighborhood)]
+        net_values = [x.net_price_m2 for x in peers if x.net_price_m2]
+        gross_values = [x.gross_price_m2 for x in peers if x.gross_price_m2]
+        median_net = statistics.median(net_values) if net_values else None
+        median_gross = statistics.median(gross_values) if gross_values else None
+
+        net_delta = ((item.net_price_m2 / median_net) - 1) * 100 if median_net and item.net_price_m2 else None
+        gross_delta = ((item.gross_price_m2 / median_gross) - 1) * 100 if median_gross and item.gross_price_m2 else None
+        deltas = [v for v in (net_delta, gross_delta) if v is not None]
+        avg_delta = statistics.mean(deltas) if deltas else 0
+        score = max(0, min(100, round(50 - avg_delta * 2)))
+
+        if score >= 70:
+            label = "Dikkat çekici"
+        elif score >= 58:
+            label = "Piyasanın altında"
+        elif score <= 35:
+            label = "Piyasanın üstünde"
+        else:
+            label = "Piyasa civarı"
+
+        result.append({
+            "id": item.id,
+            "opportunity_score": score,
+            "opportunity_label": label,
+            "net_vs_neighborhood_pct": round(net_delta, 1) if net_delta is not None else None,
+            "gross_vs_neighborhood_pct": round(gross_delta, 1) if gross_delta is not None else None,
+        })
+    return result
+
+
 def provider_status():
     if isinstance(PROVIDER, AuthorizedSahibindenProvider):
         return {
@@ -658,7 +700,7 @@ Yetkili Sahibinden API modu seçili ancak erişim bilgileri eksik.
 <div class="title" style="margin-top:16px">İlanlar</div>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Mahalle</th><th>Oda</th><th>Brüt</th><th>Net</th><th>Fiyat</th><th>Brüt TL/m²</th><th>Net TL/m²</th><th>Tarih</th></tr></thead>
+<thead><tr><th>Mahalle</th><th>Oda</th><th>Brüt</th><th>Net</th><th>Fiyat</th><th>Brüt TL/m²</th><th>Net TL/m²</th><th>Mahalleye göre</th><th>PAS puanı</th><th>Tarih</th></tr></thead>
 <tbody id="listingRows"></tbody>
 </table>
 </div>
@@ -807,6 +849,8 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
      <td>${fmtMoney(r.price)}</td>
      <td>${fmtMoney(r.gross_price_m2)}</td>
      <td>${fmtMoney(r.net_price_m2)}</td>
+     <td>${r.net_vs_neighborhood_pct==null?"-":(r.net_vs_neighborhood_pct>0?"+":"")+r.net_vs_neighborhood_pct+"%"}</td>
+     <td><strong>${r.opportunity_score ?? "-"}</strong><div class="small">${esc(r.opportunity_label||"")}</div></td>
      <td>${esc(r.listing_date)}</td>
     </tr>
    `).join("");
@@ -876,12 +920,25 @@ def api_search():
 
         listings = PROVIDER.search(filters)
         analysis = analyze(listings)
+        opportunity = opportunity_analysis(listings)
+        opportunity_by_id = {str(x["id"]): x for x in opportunity}
+
+        listing_rows = []
+        for item in listings:
+            row = item.to_dict()
+            row.update(opportunity_by_id.get(str(item.id), {}))
+            listing_rows.append(row)
+
+        listing_rows.sort(
+            key=lambda x: (x.get("opportunity_score") or 0),
+            reverse=True,
+        )
 
         return jsonify({
             "ok": True,
             "provider": PROVIDER.name,
             "analysis": analysis,
-            "listings": [x.to_dict() for x in listings],
+            "listings": listing_rows,
         })
 
     except Exception as exc:
