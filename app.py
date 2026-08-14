@@ -4,8 +4,6 @@ import json
 import math
 import random
 import statistics
-import unicodedata
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from dataclasses import dataclass, asdict
@@ -20,9 +18,16 @@ app = Flask(__name__)
 # Mimari:
 #   UI -> /api/search -> ListingProvider -> normalize -> analyze
 #
-# Şu an aktif sağlayıcı: DemoListingProvider
-# Daha sonra yetkili Sahibinden API erişimi olduğunda
-# yalnızca provider katmanı değiştirilecek.
+# Railway Variables:
+#   PAS_PROVIDER=demo
+#   PAS_PROVIDER=apify
+#   PAS_PROVIDER=authorized_sahibinden
+#
+# Apify için:
+#   APIFY_API_TOKEN=...
+#   APIFY_ACTOR_ID=clearpath~sahibinden-real-estate  (opsiyonel)
+#   APIFY_MAX_RESULTS=20                            (opsiyonel)
+#   APIFY_TIMEOUT=300                              (opsiyonel)
 # =========================================================
 
 DISTRICTS = [
@@ -141,6 +146,68 @@ DISTRICT_BASE_M2 = {
 ROOMS = ["1+1", "2+1", "3+1", "4+1", "5+1 ve üzeri"]
 
 
+def parse_int(value):
+    """TL, m² ve benzeri sayısal alanları güvenli biçimde tam sayıya çevirir."""
+    if value in (None, ""):
+        return None
+
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # Para birimi, m² gibi yazıları temizle.
+    text = re.sub(r"[^\d,.\-]", "", text)
+    if not text:
+        return None
+
+    try:
+        if "," in text and "." in text:
+            # 22.000.000,00 veya 22,000,000.00
+            if text.rfind(",") > text.rfind("."):
+                text = text.replace(".", "").replace(",", ".")
+            else:
+                text = text.replace(",", "")
+        elif "," in text:
+            parts = text.split(",")
+            if len(parts) > 1 and all(p.isdigit() for p in parts) and len(parts[-1]) == 3:
+                text = "".join(parts)
+            else:
+                text = text.replace(",", ".")
+        elif "." in text:
+            parts = text.split(".")
+            if len(parts) > 1 and all(p.isdigit() for p in parts) and len(parts[-1]) == 3:
+                text = "".join(parts)
+
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def stable_seed(text):
+    total = 0
+    for i, ch in enumerate(str(text), start=1):
+        total += i * ord(ch)
+    return total % 10_000_000
+
+
+def normalize_place_name(value):
+    text = str(value or "").strip()
+    text = re.sub(
+        r"\s+(Mahallesi|Mah\.|Mh\.|Mah|Mh)$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text.strip()
+
+
 @dataclass
 class Listing:
     id: str
@@ -156,11 +223,11 @@ class Listing:
 
     @property
     def gross_price_m2(self):
-        return round(self.price / self.gross_m2) if self.gross_m2 else None
+        return round(self.price / self.gross_m2) if self.price and self.gross_m2 else None
 
     @property
     def net_price_m2(self):
-        return round(self.price / self.net_m2) if self.net_m2 else None
+        return round(self.price / self.net_m2) if self.price and self.net_m2 else None
 
     def to_dict(self):
         d = asdict(self)
@@ -170,7 +237,7 @@ class Listing:
 
 
 class ListingProvider:
-    """Yetkili veri kaynağı entegrasyonu için arayüz."""
+    """Veri kaynağı entegrasyonları için ortak arayüz."""
 
     name = "base"
 
@@ -179,11 +246,7 @@ class ListingProvider:
 
 
 class DemoListingProvider(ListingProvider):
-    """
-    Geliştirme sağlayıcısı.
-    Gerçek Sahibinden verisi çekmez.
-    Aynı filtrelerle her seferinde aynı örnek ilanları üretir.
-    """
+    """Gerçek veri çekmeden geliştirme/test için deterministik örnek ilan üretir."""
 
     name = "demo"
 
@@ -260,17 +323,7 @@ class DemoListingProvider(ListingProvider):
 
 
 class AuthorizedSahibindenProvider(ListingProvider):
-    """
-    Yetkili Sahibinden API bağlantısı için production-ready iskelet.
-
-    Railway Variables:
-      PAS_PROVIDER=authorized_sahibinden
-      SAHIBINDEN_API_BASE_URL=https://...
-      SAHIBINDEN_API_KEY=...
-      SAHIBINDEN_API_AUTH_SCHEME=Bearer
-      SAHIBINDEN_API_SEARCH_PATH=/...
-      SAHIBINDEN_API_TIMEOUT=15
-    """
+    """Yetkili Sahibinden API bağlantısı için iskelet."""
 
     name = "authorized_sahibinden"
 
@@ -279,7 +332,7 @@ class AuthorizedSahibindenProvider(ListingProvider):
         self.api_key = os.environ.get("SAHIBINDEN_API_KEY", "").strip()
         self.auth_scheme = os.environ.get("SAHIBINDEN_API_AUTH_SCHEME", "Bearer").strip()
         self.search_path = os.environ.get("SAHIBINDEN_API_SEARCH_PATH", "").strip()
-        self.timeout = parse_int(os.environ.get("SAHIBINDEN_API_TIMEOUT")) or 15
+        self.timeout = parse_int(os.environ.get("SAHIBINDEN_API_TIMEOUT", "15")) or 15
 
     def configured(self):
         return bool(self.base_url and self.api_key and self.search_path)
@@ -304,6 +357,8 @@ class AuthorizedSahibindenProvider(ListingProvider):
             raise RuntimeError("Sahibinden API geçersiz JSON döndürdü.") from exc
 
     def _build_query(self, filters):
+        from urllib.parse import urlencode
+
         params = {}
         districts = filters.get("districts") or []
         neighborhoods = filters.get("neighborhoods") or {}
@@ -315,6 +370,7 @@ class AuthorizedSahibindenProvider(ListingProvider):
         for district in districts:
             for nb in neighborhoods.get(district) or []:
                 flat_neighborhoods.append(f"{district}:{nb}")
+
         if flat_neighborhoods:
             params["neighborhoods"] = "|".join(flat_neighborhoods)
 
@@ -326,7 +382,7 @@ class AuthorizedSahibindenProvider(ListingProvider):
             if value not in (None, ""):
                 params[key] = value
 
-        return params
+        return urlencode(params)
 
     def _normalize_item(self, item):
         def first(*keys, default=None):
@@ -342,7 +398,9 @@ class AuthorizedSahibindenProvider(ListingProvider):
         gross_m2 = parse_int(first("grossM2", "gross_m2", "brutM2", "areaGross"))
         net_m2 = parse_int(first("netM2", "net_m2", "netM2Value", "areaNet"))
         rooms = str(first("rooms", "roomCount", "oda", default="")).strip()
-        listing_date = str(first("listingDate", "date", "createdAt", "ilanTarihi", default=date.today().isoformat()))[:10]
+        listing_date = str(
+            first("listingDate", "date", "createdAt", "ilanTarihi", default=date.today().isoformat())
+        )[:10]
         listing_id = str(first("id", "listingId", "ilanNo", default=stable_seed(title + district)))
 
         if not district or not neighborhood or not price or not gross_m2 or not net_m2:
@@ -363,16 +421,12 @@ class AuthorizedSahibindenProvider(ListingProvider):
 
     def search(self, filters):
         if not self.configured():
-            raise RuntimeError(
-                "Yetkili Sahibinden API yapılandırması eksik. "
-                "Railway Variables'a SAHIBINDEN_API_BASE_URL, "
-                "SAHIBINDEN_API_KEY ve SAHIBINDEN_API_SEARCH_PATH eklenmeli."
-            )
+            raise RuntimeError("Yetkili Sahibinden API yapılandırması eksik.")
 
         url = f"{self.base_url}/{self.search_path.lstrip('/')}"
-        params = self._build_query(filters)
-        if params:
-            url += "?" + urlencode(params)
+        query = self._build_query(filters)
+        if query:
+            url += "?" + query
 
         payload = self._request_json(url)
         raw_items = (
@@ -389,7 +443,10 @@ class AuthorizedSahibindenProvider(ListingProvider):
                 normalized = self._normalize_item(item)
                 if normalized:
                     listings.append(normalized)
+
         return listings
+
+
 class ApifyListingProvider(ListingProvider):
     name = "apify"
 
@@ -397,23 +454,22 @@ class ApifyListingProvider(ListingProvider):
         self.api_token = os.environ.get("APIFY_API_TOKEN", "").strip()
         self.actor_id = os.environ.get(
             "APIFY_ACTOR_ID",
-            "clearpath~sahibinden-real-estate"
+            "clearpath~sahibinden-real-estate",
         ).strip()
-        self.max_results = parse_int(
-            os.environ.get("APIFY_MAX_RESULTS", "20")
-        ) or 20
+        self.max_results = parse_int(os.environ.get("APIFY_MAX_RESULTS", "20")) or 20
+        self.timeout = parse_int(os.environ.get("APIFY_TIMEOUT", "300")) or 300
 
     def configured(self):
         return bool(self.api_token)
 
     def _run_actor(self, actor_input):
+        # Resmi Apify v2 synchronous Actor endpoint.
         url = (
-            f"https://api.apify.com/v2/acts/{self.actor_id}"
-            f"/run-sync-get-dataset-items?"
-            + urlencode({"token": self.api_token})
+            f"https://api.apify.com/v2/actors/{self.actor_id}"
+            "/run-sync-get-dataset-items"
         )
 
-        body = json.dumps(actor_input).encode("utf-8")
+        body = json.dumps(actor_input, ensure_ascii=False).encode("utf-8")
 
         req = Request(
             url,
@@ -421,60 +477,66 @@ class ApifyListingProvider(ListingProvider):
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
+                "Authorization": f"Bearer {self.api_token}",
                 "User-Agent": "PAS/1.0",
             },
             method="POST",
         )
 
         try:
-            with urlopen(req, timeout=300) as response:
-                return json.loads(response.read().decode("utf-8"))
+            with urlopen(req, timeout=self.timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+                if isinstance(payload, list):
+                    return payload
+                if isinstance(payload, dict):
+                    return payload.get("items") or payload.get("data") or payload.get("results") or []
+                return []
         except HTTPError as exc:
-            raise RuntimeError(
-                f"Apify HTTP hatası: {exc.code}"
-            ) from exc
+            try:
+                detail = exc.read().decode("utf-8", errors="ignore")[:500]
+            except Exception:
+                detail = ""
+            raise RuntimeError(f"Apify HTTP hatası: {exc.code}. {detail}") from exc
         except URLError as exc:
-            raise RuntimeError(
-                f"Apify bağlantı hatası: {exc}"
-            ) from exc
+            raise RuntimeError(f"Apify bağlantı hatası: {exc.reason}") from exc
         except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "Apify geçerli JSON döndürmedi."
-            ) from exc
+            raise RuntimeError("Apify geçerli JSON döndürmedi.") from exc
 
     def _normalize_item(self, item):
-        district = str(item.get("district") or "").strip()
-
-        neighborhood = str(
+        district = normalize_place_name(item.get("district") or item.get("districtName"))
+        neighborhood = normalize_place_name(
             item.get("quarter")
             or item.get("neighborhood")
-            or ""
-        ).strip()
+            or item.get("neighborhoodName")
+        )
 
-        listing_id = str(item.get("id") or "").strip()
-        title = str(item.get("title") or "").strip()
+        listing_id = str(item.get("id") or item.get("listingId") or "").strip()
+        title = str(item.get("title") or item.get("listingTitle") or "İlan").strip()
 
-        price = parse_int(item.get("price"))
+        price = parse_int(item.get("price") or item.get("salePrice"))
         gross_m2 = parse_int(
             item.get("grossSize")
             or item.get("grossM2")
+            or item.get("areaGross")
         )
         net_m2 = parse_int(
             item.get("netSize")
             or item.get("netM2")
+            or item.get("areaNet")
         )
 
-        rooms = str(item.get("rooms") or "").strip()
+        rooms = str(item.get("rooms") or item.get("roomCount") or "").strip()
 
         listed_at = str(
             item.get("listedAt")
             or item.get("listingDate")
+            or item.get("createdAt")
             or ""
         ).strip()
-
         listing_date = listed_at[:10] if listed_at else ""
 
-        if not listing_id or not district:
+        # PAS hesapları için bu temel alanlar zorunlu.
+        if not listing_id or not district or not neighborhood or not price or not gross_m2 or not net_m2:
             return None
 
         return Listing(
@@ -492,9 +554,7 @@ class ApifyListingProvider(ListingProvider):
 
     def search(self, filters):
         if not self.configured():
-            raise RuntimeError(
-                "APIFY_API_TOKEN tanımlı değil."
-            )
+            raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
         districts = filters.get("districts") or []
 
@@ -509,52 +569,36 @@ class ApifyListingProvider(ListingProvider):
             "maxResults": self.max_results,
         }
 
-        rooms = filters.get("rooms")
-        if rooms:
-            actor_input["rooms"] = (
-                rooms if isinstance(rooms, list) else [rooms]
-            )
+        requested_rooms = filters.get("rooms") or ""
+        if requested_rooms:
+            actor_input["rooms"] = [requested_rooms]
 
-        min_price = filters.get("min_price")
-        max_price = filters.get("max_price")
+        min_price = parse_int(filters.get("min_price"))
+        max_price = parse_int(filters.get("max_price"))
+        min_size = parse_int(filters.get("min_m2"))
+        max_size = parse_int(filters.get("max_m2"))
 
-        if min_price not in (None, ""):
-            actor_input["minPrice"] = parse_int(min_price)
-
-        if max_price not in (None, ""):
-            actor_input["maxPrice"] = parse_int(max_price)
-
-        gross_min = filters.get("min_m2")
-        gross_max = filters.get("max_m2")
-        net_min = filters.get("net_m2_min")
-        net_max = filters.get("net_m2_max")
-
-        if gross_min not in (None, ""):
-            actor_input["minSize"] = parse_int(gross_min)
-
-        if gross_max not in (None, ""):
-            actor_input["maxSize"] = parse_int(gross_max)
-
-        if net_min not in (None, ""):
-            actor_input["minNetSize"] = parse_int(net_min)
-
-        if net_max not in (None, ""):
-            actor_input["maxNetSize"] = parse_int(net_max)
+        if min_price is not None:
+            actor_input["minPrice"] = min_price
+        if max_price is not None:
+            actor_input["maxPrice"] = max_price
+        if min_size is not None:
+            actor_input["minSize"] = min_size
+        if max_size is not None:
+            actor_input["maxSize"] = max_size
 
         raw_items = self._run_actor(actor_input)
 
         requested_neighborhoods = filters.get("neighborhoods") or {}
         allowed_neighborhoods = set()
-
         for district in districts:
             for neighborhood in requested_neighborhoods.get(district, []):
-                allowed_neighborhoods.add(
-                    str(neighborhood)
-                    .replace(" Mah.", "")
-                    .replace(" Mh.", "")
-                    .strip()
-                    .casefold()
-                )
+                allowed_neighborhoods.add(normalize_place_name(neighborhood).casefold())
+
+        net_m2_min = parse_int(filters.get("net_m2_min"))
+        net_m2_max = parse_int(filters.get("net_m2_max"))
+        gross_m2_min = parse_int(filters.get("gross_m2_min"))
+        gross_m2_max = parse_int(filters.get("gross_m2_max"))
 
         listings = []
 
@@ -567,20 +611,23 @@ class ApifyListingProvider(ListingProvider):
                 continue
 
             if allowed_neighborhoods:
-                nb = (
-                    normalized.neighborhood
-                    .replace(" Mah.", "")
-                    .replace(" Mh.", "")
-                    .strip()
-                    .casefold()
-                )
-
-                if nb not in allowed_neighborhoods:
+                normalized_nb = normalize_place_name(normalized.neighborhood).casefold()
+                if normalized_nb not in allowed_neighborhoods:
                     continue
+
+            if net_m2_min is not None and normalized.net_price_m2 < net_m2_min:
+                continue
+            if net_m2_max is not None and normalized.net_price_m2 > net_m2_max:
+                continue
+            if gross_m2_min is not None and normalized.gross_price_m2 < gross_m2_min:
+                continue
+            if gross_m2_max is not None and normalized.gross_price_m2 > gross_m2_max:
+                continue
 
             listings.append(normalized)
 
         return listings
+
 
 def build_provider():
     mode = os.environ.get("PAS_PROVIDER", "demo").strip().lower()
@@ -595,22 +642,6 @@ def build_provider():
 
 
 PROVIDER = build_provider()
-
-
-def parse_int(value):
-    if value in (None, ""):
-        return None
-    try:
-        return int(str(value).replace(".", "").replace(",", "").strip())
-    except (TypeError, ValueError):
-        return None
-
-
-def stable_seed(text):
-    total = 0
-    for i, ch in enumerate(str(text), start=1):
-        total += i * ord(ch)
-    return total % 10_000_000
 
 
 def percentile(values, p):
@@ -642,7 +673,7 @@ def analyze(listings):
             "by_neighborhood": [],
         }
 
-    prices = [x.price for x in listings]
+    prices = [x.price for x in listings if x.price]
     m2s = [x.gross_price_m2 for x in listings if x.gross_price_m2]
     net_m2s = [x.net_price_m2 for x in listings if x.net_price_m2]
 
@@ -653,8 +684,10 @@ def analyze(listings):
 
     by_neighborhood = []
     for key, rows in grouped.items():
-        row_prices = [x.price for x in rows]
+        row_prices = [x.price for x in rows if x.price]
         row_m2s = [x.gross_price_m2 for x in rows if x.gross_price_m2]
+        if not row_prices or not row_m2s:
+            continue
         by_neighborhood.append({
             "name": key,
             "count": len(rows),
@@ -662,19 +695,16 @@ def analyze(listings):
             "median_gross_m2_price": round(statistics.median(row_m2s)),
         })
 
-    by_neighborhood.sort(
-        key=lambda x: x["median_gross_m2_price"],
-        reverse=True
-    )
+    by_neighborhood.sort(key=lambda x: x["median_gross_m2_price"], reverse=True)
 
     return {
         "count": len(listings),
-        "median_price": round(statistics.median(prices)),
-        "avg_price": round(statistics.mean(prices)),
-        "median_gross_m2_price": round(statistics.median(m2s)),
-        "avg_gross_m2_price": round(statistics.mean(m2s)),
-        "median_net_m2_price": round(statistics.median(net_m2s)),
-        "avg_net_m2_price": round(statistics.mean(net_m2s)),
+        "median_price": round(statistics.median(prices)) if prices else None,
+        "avg_price": round(statistics.mean(prices)) if prices else None,
+        "median_gross_m2_price": round(statistics.median(m2s)) if m2s else None,
+        "avg_gross_m2_price": round(statistics.mean(m2s)) if m2s else None,
+        "median_net_m2_price": round(statistics.median(net_m2s)) if net_m2s else None,
+        "avg_net_m2_price": round(statistics.mean(net_m2s)) if net_m2s else None,
         "q1_gross_m2_price": percentile(m2s, 0.25),
         "q3_gross_m2_price": percentile(m2s, 0.75),
         "by_neighborhood": by_neighborhood,
@@ -682,7 +712,6 @@ def analyze(listings):
 
 
 def opportunity_analysis(listings):
-    """Mahalle medyanlarına göre karşılaştırmalı PAS fırsat göstergesi."""
     if not listings:
         return []
 
@@ -691,15 +720,26 @@ def opportunity_analysis(listings):
         groups.setdefault((item.district, item.neighborhood), []).append(item)
 
     result = []
+
     for item in listings:
         peers = groups[(item.district, item.neighborhood)]
         net_values = [x.net_price_m2 for x in peers if x.net_price_m2]
         gross_values = [x.gross_price_m2 for x in peers if x.gross_price_m2]
+
         median_net = statistics.median(net_values) if net_values else None
         median_gross = statistics.median(gross_values) if gross_values else None
 
-        net_delta = ((item.net_price_m2 / median_net) - 1) * 100 if median_net and item.net_price_m2 else None
-        gross_delta = ((item.gross_price_m2 / median_gross) - 1) * 100 if median_gross and item.gross_price_m2 else None
+        net_delta = (
+            ((item.net_price_m2 / median_net) - 1) * 100
+            if median_net and item.net_price_m2
+            else None
+        )
+        gross_delta = (
+            ((item.gross_price_m2 / median_gross) - 1) * 100
+            if median_gross and item.gross_price_m2
+            else None
+        )
+
         deltas = [v for v in (net_delta, gross_delta) if v is not None]
         avg_delta = statistics.mean(deltas) if deltas else 0
         score = max(0, min(100, round(50 - avg_delta * 2)))
@@ -720,16 +760,25 @@ def opportunity_analysis(listings):
             "net_vs_neighborhood_pct": round(net_delta, 1) if net_delta is not None else None,
             "gross_vs_neighborhood_pct": round(gross_delta, 1) if gross_delta is not None else None,
         })
+
     return result
 
 
 def provider_status():
+    if isinstance(PROVIDER, ApifyListingProvider):
+        return {
+            "mode": "apify",
+            "configured": PROVIDER.configured(),
+            "label": "Apify · Sahibinden canlı veri",
+        }
+
     if isinstance(PROVIDER, AuthorizedSahibindenProvider):
         return {
             "mode": "authorized_sahibinden",
             "configured": PROVIDER.configured(),
             "label": "Sahibinden yetkili API",
         }
+
     return {
         "mode": "demo",
         "configured": True,
@@ -797,7 +846,11 @@ th{font-size:12px;color:#6b7280}
 <div class="notice">
 <strong>Veri sağlayıcı:</strong> {{ provider_status.label }}.
 {% if provider_status.mode == "demo" %}
-Şu an demo veri kullanılıyor. Yetkili Sahibinden API erişimi geldiğinde Railway Variables üzerinden gerçek veri moduna geçilecek.
+Şu an demo veri kullanılıyor.
+{% elif provider_status.mode == "apify" and provider_status.configured %}
+Apify üzerinden canlı ilan verisi modu aktif.
+{% elif provider_status.mode == "apify" %}
+Apify modu seçili ancak API tokenı eksik.
 {% elif provider_status.configured %}
 Yetkili Sahibinden API yapılandırması aktif.
 {% else %}
@@ -1069,8 +1122,6 @@ renderDistricts();
 
 @app.route("/", methods=["GET", "POST"])
 def home():
-    # Eski tarayıcı önbelleğinde kalan POST / istekleri 405 vermesin.
-    # Her iki durumda da güncel PAS arayüzünü göster.
     return render_template_string(
         PAGE,
         districts_json=json.dumps(DISTRICTS, ensure_ascii=False),
@@ -1141,7 +1192,6 @@ def api_search():
             "ok": False,
             "error": f"Veri hazırlanırken hata oluştu: {exc}"
         }), 500
-
 
 
 @app.get("/api/provider-status")
