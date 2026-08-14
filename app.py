@@ -390,12 +390,207 @@ class AuthorizedSahibindenProvider(ListingProvider):
                 if normalized:
                     listings.append(normalized)
         return listings
+class ApifyListingProvider(ListingProvider):
+    name = "apify"
 
+    def __init__(self):
+        self.api_token = os.environ.get("APIFY_API_TOKEN", "").strip()
+        self.actor_id = os.environ.get(
+            "APIFY_ACTOR_ID",
+            "clearpath~sahibinden-real-estate"
+        ).strip()
+        self.max_results = parse_int(
+            os.environ.get("APIFY_MAX_RESULTS", "20")
+        ) or 20
+
+    def configured(self):
+        return bool(self.api_token)
+
+    def _run_actor(self, actor_input):
+        url = (
+            f"https://api.apify.com/v2/acts/{self.actor_id}"
+            f"/run-sync-get-dataset-items?"
+            + urlencode({"token": self.api_token})
+        )
+
+        body = json.dumps(actor_input).encode("utf-8")
+
+        req = Request(
+            url,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "PAS/1.0",
+            },
+            method="POST",
+        )
+
+        try:
+            with urlopen(req, timeout=300) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            raise RuntimeError(
+                f"Apify HTTP hatası: {exc.code}"
+            ) from exc
+        except URLError as exc:
+            raise RuntimeError(
+                f"Apify bağlantı hatası: {exc}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Apify geçerli JSON döndürmedi."
+            ) from exc
+
+    def _normalize_item(self, item):
+        district = str(item.get("district") or "").strip()
+
+        neighborhood = str(
+            item.get("quarter")
+            or item.get("neighborhood")
+            or ""
+        ).strip()
+
+        listing_id = str(item.get("id") or "").strip()
+        title = str(item.get("title") or "").strip()
+
+        price = parse_int(item.get("price"))
+        gross_m2 = parse_int(
+            item.get("grossSize")
+            or item.get("grossM2")
+        )
+        net_m2 = parse_int(
+            item.get("netSize")
+            or item.get("netM2")
+        )
+
+        rooms = str(item.get("rooms") or "").strip()
+
+        listed_at = str(
+            item.get("listedAt")
+            or item.get("listingDate")
+            or ""
+        ).strip()
+
+        listing_date = listed_at[:10] if listed_at else ""
+
+        if not listing_id or not district:
+            return None
+
+        return Listing(
+            id=listing_id,
+            district=district,
+            neighborhood=neighborhood,
+            title=title,
+            price=price,
+            gross_m2=gross_m2,
+            net_m2=net_m2,
+            rooms=rooms,
+            listing_date=listing_date,
+            source=self.name,
+        )
+
+    def search(self, filters):
+        if not self.configured():
+            raise RuntimeError(
+                "APIFY_API_TOKEN tanımlı değil."
+            )
+
+        districts = filters.get("districts") or []
+
+        actor_input = {
+            "listingType": "Sale",
+            "propertyCategory": "Residential",
+            "propertyType": ["Apartment"],
+            "city": "Istanbul",
+            "district": districts,
+            "sortBy": "Newest",
+            "extractPhoneNumbers": False,
+            "maxResults": self.max_results,
+        }
+
+        rooms = filters.get("rooms")
+        if rooms:
+            actor_input["rooms"] = (
+                rooms if isinstance(rooms, list) else [rooms]
+            )
+
+        min_price = filters.get("min_price")
+        max_price = filters.get("max_price")
+
+        if min_price not in (None, ""):
+            actor_input["minPrice"] = parse_int(min_price)
+
+        if max_price not in (None, ""):
+            actor_input["maxPrice"] = parse_int(max_price)
+
+        gross_min = filters.get("min_m2")
+        gross_max = filters.get("max_m2")
+        net_min = filters.get("net_m2_min")
+        net_max = filters.get("net_m2_max")
+
+        if gross_min not in (None, ""):
+            actor_input["minSize"] = parse_int(gross_min)
+
+        if gross_max not in (None, ""):
+            actor_input["maxSize"] = parse_int(gross_max)
+
+        if net_min not in (None, ""):
+            actor_input["minNetSize"] = parse_int(net_min)
+
+        if net_max not in (None, ""):
+            actor_input["maxNetSize"] = parse_int(net_max)
+
+        raw_items = self._run_actor(actor_input)
+
+        requested_neighborhoods = filters.get("neighborhoods") or {}
+        allowed_neighborhoods = set()
+
+        for district in districts:
+            for neighborhood in requested_neighborhoods.get(district, []):
+                allowed_neighborhoods.add(
+                    str(neighborhood)
+                    .replace(" Mah.", "")
+                    .replace(" Mh.", "")
+                    .strip()
+                    .casefold()
+                )
+
+        listings = []
+
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+
+            normalized = self._normalize_item(item)
+            if not normalized:
+                continue
+
+            if allowed_neighborhoods:
+                nb = (
+                    normalized.neighborhood
+                    .replace(" Mah.", "")
+                    .replace(" Mh.", "")
+                    .strip()
+                    .casefold()
+                )
+
+                if nb not in allowed_neighborhoods:
+                    continue
+
+            listings.append(normalized)
+
+        return listings
 
 def build_provider():
     mode = os.environ.get("PAS_PROVIDER", "demo").strip().lower()
+
+    if mode == "apify":
+        return ApifyListingProvider()
+
     if mode == "authorized_sahibinden":
         return AuthorizedSahibindenProvider()
+
     return DemoListingProvider()
 
 
