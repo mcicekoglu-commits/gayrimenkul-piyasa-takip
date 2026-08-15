@@ -223,11 +223,10 @@ def sahibinden_search_url(district, neighborhood=None):
     district_slug = sahibinden_slug(district)
     if neighborhood:
         neighborhood_slug = sahibinden_slug(neighborhood)
-        # Sahibinden'in doğrulanmış mahalle URL kalıbı:
-        # /satilik-daire/istanbul-kadikoy-erenkoy
+        # Sahibinden'in mahalleye özel gerçek arama URL'si.
         return (
             "https://www.sahibinden.com/satilik-daire/"
-            f"istanbul-{district_slug}-{neighborhood_slug}"
+            f"istanbul-{district_slug}-{neighborhood_slug}-{neighborhood_slug}-mh."
         )
     return (
         "https://www.sahibinden.com/satilik-daire/"
@@ -684,7 +683,6 @@ class ApifyListingProvider(ListingProvider):
         listing._listing_url = listing_url
         listing._raw_district = raw_district
         listing._raw_neighborhood = raw_neighborhood
-        listing._source_url = str(item.get("sourceUrl") or raw.get("sourceUrl") or "").strip()
         listing._input_index = parse_int(item.get("inputIndex"))
         return listing
 
@@ -760,9 +758,10 @@ class ApifyListingProvider(ListingProvider):
             if not normalized:
                 continue
 
-            # Kayıt hangi startUrl'den geldiyse hedefi onunla eşleştir.
+            # Kayıt hangi startUrl'den geldiyse o hedefe göre doğrula.
             item_index = getattr(normalized, "_input_index", None)
             target = None
+
             if item_index is not None and 0 <= item_index < len(targets):
                 target = targets[item_index]
             elif single_target:
@@ -779,13 +778,13 @@ class ApifyListingProvider(ListingProvider):
                     getattr(normalized, "_raw_neighborhood", "") or ""
                 )
 
-                # Apify gerçek konumu döndürmüşse, yanlış bölge ilanını kesinlikle alma.
+                # Apify gerçek konumu döndürmüşse yanlış bölge ilanını kabul etme.
                 if actual_district and actual_district != expected_district:
                     continue
                 if actual_neighborhood and actual_neighborhood != expected_neighborhood:
                     continue
 
-                # Konum alanı eksikse yalnızca ilgili startUrl'ün hedefini fallback olarak kullan.
+                # Konum alanı boşsa URL hedefini fallback olarak kullan.
                 if not actual_district:
                     normalized.district = target["district"]
                 if not actual_neighborhood:
@@ -973,7 +972,7 @@ def provider_status():
         return {
             "mode": "apify",
             "configured": PROVIDER.configured(),
-            "label": "Apify · doğrulanmış mahalle URL + gerçek konum filtresi",
+            "label": "Apify · Erenköy URL + gerçek konum doğrulama",
         }
 
     if isinstance(PROVIDER, AuthorizedSahibindenProvider):
