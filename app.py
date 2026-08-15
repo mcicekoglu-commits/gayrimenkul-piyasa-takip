@@ -25,9 +25,9 @@ app = Flask(__name__)
 #
 # Apify için:
 #   APIFY_API_TOKEN=...
-#   APIFY_ACTOR_ID=clearpath~sahibinden-real-estate  (opsiyonel)
-#   APIFY_MAX_RESULTS=20                            (opsiyonel)
+#   APIFY_API_TOKEN=...
 #   APIFY_TIMEOUT=300                              (opsiyonel)
+# Actor kod içinde sabit: clearpath~sahibinden-scraper-pro
 # =========================================================
 
 DISTRICTS = [
@@ -206,6 +206,33 @@ def normalize_place_name(value):
         flags=re.IGNORECASE,
     )
     return text.strip()
+
+
+def sahibinden_slug(value):
+    text = normalize_place_name(value).casefold()
+    replacements = {
+        "ı": "i", "ğ": "g", "ü": "u",
+        "ş": "s", "ö": "o", "ç": "c",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+
+
+def sahibinden_search_url(district, neighborhood=None):
+    district_slug = sahibinden_slug(district)
+    if neighborhood:
+        neighborhood_slug = sahibinden_slug(neighborhood)
+        return (
+            "https://www.sahibinden.com/satilik-daire/"
+            f"istanbul-{district_slug}-{neighborhood_slug}-{neighborhood_slug}-mh."
+        )
+    return (
+        "https://www.sahibinden.com/satilik-daire/"
+        f"istanbul-{district_slug}"
+    )
+
+
 
 
 @dataclass
@@ -448,25 +475,32 @@ class AuthorizedSahibindenProvider(ListingProvider):
 
 
 class ApifyListingProvider(ListingProvider):
+    """
+    Mahalle hedefli Apify sağlayıcısı.
+
+    Eski `clearpath/sahibinden-real-estate` Actor'ü kullanılmaz.
+    Actor kimliği kod içinde sabittir; Railway'deki eski APIFY_ACTOR_ID
+    değişkeni bunu etkileyemez.
+
+    Seçilen mahalle için doğrudan Sahibinden arama URL'si gönderilir.
+    """
+
     name = "apify"
+    ACTOR_ID = "clearpath~sahibinden-scraper-pro"
 
     def __init__(self):
         self.api_token = os.environ.get("APIFY_API_TOKEN", "").strip()
-        self.actor_id = os.environ.get(
-            "APIFY_ACTOR_ID",
-            "clearpath~sahibinden-real-estate",
-        ).strip()
-        self.max_results = parse_int(os.environ.get("APIFY_MAX_RESULTS", "20")) or 20
+        self.actor_id = self.ACTOR_ID
         self.timeout = parse_int(os.environ.get("APIFY_TIMEOUT", "300")) or 300
 
     def configured(self):
         return bool(self.api_token)
 
     def _run_actor(self, actor_input):
-        # Resmi Apify v2 synchronous Actor endpoint.
         url = (
-            f"https://api.apify.com/v2/actors/{self.actor_id}"
+            f"https://api.apify.com/v2/acts/{self.actor_id}"
             "/run-sync-get-dataset-items"
+            "?clean=true"
         )
 
         body = json.dumps(actor_input, ensure_ascii=False).encode("utf-8")
@@ -486,60 +520,121 @@ class ApifyListingProvider(ListingProvider):
         try:
             with urlopen(req, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-                if isinstance(payload, list):
-                    return payload
-                if isinstance(payload, dict):
-                    return payload.get("items") or payload.get("data") or payload.get("results") or []
-                return []
+
+            if isinstance(payload, list):
+                return payload
+
+            if isinstance(payload, dict):
+                return (
+                    payload.get("items")
+                    or payload.get("data")
+                    or payload.get("results")
+                    or []
+                )
+
+            return []
+
         except HTTPError as exc:
             try:
-                detail = exc.read().decode("utf-8", errors="ignore")[:500]
+                detail = exc.read().decode("utf-8", errors="ignore")[:800]
             except Exception:
                 detail = ""
-            raise RuntimeError(f"Apify HTTP hatası: {exc.code}. {detail}") from exc
+            raise RuntimeError(
+                f"Apify HTTP hatası: {exc.code}. {detail}"
+            ) from exc
         except URLError as exc:
-            raise RuntimeError(f"Apify bağlantı hatası: {exc.reason}") from exc
+            raise RuntimeError(
+                f"Apify bağlantı hatası: {exc.reason}"
+            ) from exc
         except json.JSONDecodeError as exc:
-            raise RuntimeError("Apify geçerli JSON döndürmedi.") from exc
+            raise RuntimeError(
+                "Apify geçerli JSON döndürmedi."
+            ) from exc
 
-    def _normalize_item(self, item):
-        district = normalize_place_name(item.get("district") or item.get("districtName"))
+    @staticmethod
+    def _pick(item, *keys):
+        for key in keys:
+            value = item.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    def _normalize_item(self, item, fallback_district="", fallback_neighborhood=""):
+        raw = item.get("rawSummary") if isinstance(item.get("rawSummary"), dict) else {}
+        location = item.get("location") if isinstance(item.get("location"), dict) else {}
+        address = item.get("address") if isinstance(item.get("address"), dict) else {}
+
+        listing_id = str(
+            self._pick(item, "id", "listingId", "adId", "classifiedId")
+            or self._pick(raw, "id", "listingId", "adId")
+            or ""
+        ).strip()
+
+        listing_url = str(
+            self._pick(item, "url", "listingUrl", "href")
+            or self._pick(raw, "url", "listingUrl")
+            or ""
+        ).strip()
+
+        if not listing_id and listing_url:
+            match = re.search(r"(\d{8,})", listing_url)
+            if match:
+                listing_id = match.group(1)
+
+        title = str(
+            self._pick(item, "title", "listingTitle", "adTitle")
+            or self._pick(raw, "title", "listingTitle")
+            or "İlan"
+        ).strip()
+
+        district = normalize_place_name(
+            self._pick(item, "district", "districtName", "ilce")
+            or self._pick(raw, "district", "districtName")
+            or self._pick(location, "district")
+            or self._pick(address, "district")
+            or fallback_district
+        )
+
         neighborhood = normalize_place_name(
-            item.get("quarter")
-            or item.get("neighborhood")
-            or item.get("neighborhoodName")
+            self._pick(item, "quarter", "neighborhood", "neighborhoodName", "mahalle")
+            or self._pick(raw, "quarter", "neighborhood", "neighborhoodName", "mahalle")
+            or self._pick(location, "quarter", "neighborhood")
+            or self._pick(address, "quarter", "neighborhood")
+            or fallback_neighborhood
         )
 
-        listing_id = str(item.get("id") or item.get("listingId") or "").strip()
-        title = str(item.get("title") or item.get("listingTitle") or "İlan").strip()
+        price = parse_int(
+            self._pick(item, "price", "salePrice", "amount", "priceValue")
+            or self._pick(raw, "price", "salePrice", "amount", "priceValue")
+        )
 
-        price = parse_int(item.get("price") or item.get("salePrice"))
         gross_m2 = parse_int(
-            item.get("grossSize")
-            or item.get("grossM2")
-            or item.get("areaGross")
-        )
-        net_m2 = parse_int(
-            item.get("netSize")
-            or item.get("netM2")
-            or item.get("areaNet")
+            self._pick(item, "grossSize", "grossM2", "grossSquareMeters", "areaGross", "size", "m2")
+            or self._pick(raw, "grossSize", "grossM2", "grossSquareMeters", "areaGross", "size", "m2")
         )
 
-        rooms = str(item.get("rooms") or item.get("roomCount") or "").strip()
+        net_m2 = parse_int(
+            self._pick(item, "netSize", "netM2", "netSquareMeters", "areaNet")
+            or self._pick(raw, "netSize", "netM2", "netSquareMeters", "areaNet")
+        )
+
+        rooms = str(
+            self._pick(item, "rooms", "roomCount", "room")
+            or self._pick(raw, "rooms", "roomCount", "room")
+            or ""
+        ).strip()
 
         listed_at = str(
-            item.get("listedAt")
-            or item.get("listingDate")
-            or item.get("createdAt")
+            self._pick(item, "listedAt", "listingDate", "createdAt", "date")
+            or self._pick(raw, "listedAt", "listingDate", "createdAt", "date")
             or ""
         ).strip()
         listing_date = listed_at[:10] if listed_at else ""
 
-        # PAS hesapları için bu temel alanlar zorunlu.
-        if not listing_id or not district or not neighborhood or not price or not gross_m2 or not net_m2:
+        if not listing_id or not district or not neighborhood or not price or not gross_m2:
             return None
 
-        return Listing(
+        listing = Listing(
             id=listing_id,
             district=district,
             neighborhood=neighborhood,
@@ -551,83 +646,105 @@ class ApifyListingProvider(ListingProvider):
             listing_date=listing_date,
             source=self.name,
         )
+        listing._listing_url = listing_url
+        return listing
 
     def search(self, filters):
         if not self.configured():
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
         districts = filters.get("districts") or []
+        selected_neighborhoods = filters.get("neighborhoods") or {}
+
+        targets = []
+        for district in districts:
+            neighborhoods = selected_neighborhoods.get(district) or []
+
+            if neighborhoods:
+                for neighborhood in neighborhoods:
+                    targets.append({
+                        "district": district,
+                        "neighborhood": neighborhood,
+                        "url": sahibinden_search_url(district, neighborhood),
+                    })
+            else:
+                targets.append({
+                    "district": district,
+                    "neighborhood": "",
+                    "url": sahibinden_search_url(district),
+                })
+
+        if not targets:
+            return []
 
         actor_input = {
-            "listingType": "Sale",
-            "propertyCategory": "Residential",
-            "propertyType": ["Apartment"],
-            "city": "Istanbul",
-            "district": districts,
-            "sortBy": "Newest",
-            "extractPhoneNumbers": False,
-            "maxResults": self.max_results,
+            "startUrls": [target["url"] for target in targets],
+            "enrichment": False,
+            "maxResults": 0,
         }
-
-        requested_rooms = filters.get("rooms") or ""
-        if requested_rooms:
-            actor_input["rooms"] = [requested_rooms]
-
-        min_price = parse_int(filters.get("min_price"))
-        max_price = parse_int(filters.get("max_price"))
-        min_size = parse_int(filters.get("min_m2"))
-        max_size = parse_int(filters.get("max_m2"))
-
-        if min_price is not None:
-            actor_input["minPrice"] = min_price
-        if max_price is not None:
-            actor_input["maxPrice"] = max_price
-        if min_size is not None:
-            actor_input["minSize"] = min_size
-        if max_size is not None:
-            actor_input["maxSize"] = max_size
 
         raw_items = self._run_actor(actor_input)
 
-        requested_neighborhoods = filters.get("neighborhoods") or {}
-        allowed_neighborhoods = set()
-        for district in districts:
-            for neighborhood in requested_neighborhoods.get(district, []):
-                allowed_neighborhoods.add(normalize_place_name(neighborhood).casefold())
+        single_target = targets[0] if len(targets) == 1 else None
+        fallback_district = single_target["district"] if single_target else ""
+        fallback_neighborhood = single_target["neighborhood"] if single_target else ""
 
+        requested_rooms = str(filters.get("rooms") or "").strip()
+        min_m2 = parse_int(filters.get("min_m2"))
+        max_m2 = parse_int(filters.get("max_m2"))
+        min_price = parse_int(filters.get("min_price"))
+        max_price = parse_int(filters.get("max_price"))
         net_m2_min = parse_int(filters.get("net_m2_min"))
         net_m2_max = parse_int(filters.get("net_m2_max"))
         gross_m2_min = parse_int(filters.get("gross_m2_min"))
         gross_m2_max = parse_int(filters.get("gross_m2_max"))
 
         listings = []
+        seen_ids = set()
 
         for item in raw_items:
             if not isinstance(item, dict):
                 continue
 
-            normalized = self._normalize_item(item)
+            normalized = self._normalize_item(
+                item,
+                fallback_district=fallback_district,
+                fallback_neighborhood=fallback_neighborhood,
+            )
             if not normalized:
                 continue
 
-            if allowed_neighborhoods:
-                normalized_nb = normalize_place_name(normalized.neighborhood).casefold()
-                if normalized_nb not in allowed_neighborhoods:
-                    continue
+            if str(normalized.id) in seen_ids:
+                continue
+            seen_ids.add(str(normalized.id))
 
-            if net_m2_min is not None and normalized.net_price_m2 < net_m2_min:
+            if requested_rooms and normalized.rooms and normalized.rooms != requested_rooms:
                 continue
-            if net_m2_max is not None and normalized.net_price_m2 > net_m2_max:
+            if min_m2 is not None and normalized.gross_m2 < min_m2:
                 continue
-            if gross_m2_min is not None and normalized.gross_price_m2 < gross_m2_min:
+            if max_m2 is not None and normalized.gross_m2 > max_m2:
                 continue
-            if gross_m2_max is not None and normalized.gross_price_m2 > gross_m2_max:
+            if min_price is not None and normalized.price < min_price:
                 continue
+            if max_price is not None and normalized.price > max_price:
+                continue
+
+            if net_m2_min is not None:
+                if not normalized.net_price_m2 or normalized.net_price_m2 < net_m2_min:
+                    continue
+            if net_m2_max is not None:
+                if not normalized.net_price_m2 or normalized.net_price_m2 > net_m2_max:
+                    continue
+            if gross_m2_min is not None:
+                if not normalized.gross_price_m2 or normalized.gross_price_m2 < gross_m2_min:
+                    continue
+            if gross_m2_max is not None:
+                if not normalized.gross_price_m2 or normalized.gross_price_m2 > gross_m2_max:
+                    continue
 
             listings.append(normalized)
 
         return listings
-
 
 def build_provider():
     mode = os.environ.get("PAS_PROVIDER", "demo").strip().lower()
@@ -769,7 +886,7 @@ def provider_status():
         return {
             "mode": "apify",
             "configured": PROVIDER.configured(),
-            "label": "Apify · Sahibinden canlı veri",
+            "label": "Apify · Sahibinden mahalle hedefli canlı veri",
         }
 
     if isinstance(PROVIDER, AuthorizedSahibindenProvider):
@@ -1173,6 +1290,7 @@ def api_search():
         for item in listings:
             row = item.to_dict()
             row.update(opportunity_by_id.get(str(item.id), {}))
+            row["url"] = getattr(item, "_listing_url", "")
             listing_rows.append(row)
 
         listing_rows.sort(
@@ -1196,10 +1314,19 @@ def api_search():
 
 @app.get("/api/provider-status")
 def api_provider_status():
-    return jsonify({
+    data = {
         "ok": True,
         **provider_status(),
-    })
+    }
+
+    if isinstance(PROVIDER, ApifyListingProvider):
+        data.update({
+            "actor_id": PROVIDER.actor_id,
+            "requested_max_results": 0,
+            "url_targeted": True,
+        })
+
+    return jsonify(data)
 
 
 if __name__ == "__main__":
