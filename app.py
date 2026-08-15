@@ -223,10 +223,11 @@ def sahibinden_search_url(district, neighborhood=None):
     district_slug = sahibinden_slug(district)
     if neighborhood:
         neighborhood_slug = sahibinden_slug(neighborhood)
-        # Sahibinden'in mahalleye özel gerçek arama URL'si.
+        # Sahibinden'in doğrulanmış mahalle URL kalıbı:
+        # /satilik-daire/istanbul-kadikoy-erenkoy
         return (
             "https://www.sahibinden.com/satilik-daire/"
-            f"istanbul-{district_slug}-{neighborhood_slug}-{neighborhood_slug}-mh."
+            f"istanbul-{district_slug}-{neighborhood_slug}"
         )
     return (
         "https://www.sahibinden.com/satilik-daire/"
@@ -606,17 +607,20 @@ class ApifyListingProvider(ListingProvider):
             or "İlan"
         ).strip()
 
-        district = normalize_place_name(
+        raw_district = normalize_place_name(
             self._pick(item, "district", "districtName", "town")
             or self._pick(raw, "district", "districtName", "town")
-            or fallback_district
+            or ""
         )
 
-        neighborhood = normalize_place_name(
+        raw_neighborhood = normalize_place_name(
             self._pick(item, "neighborhood", "quarter", "neighborhoodName")
             or self._pick(raw, "neighborhood", "quarter", "neighborhoodName")
-            or fallback_neighborhood
+            or ""
         )
+
+        district = raw_district or fallback_district
+        neighborhood = raw_neighborhood or fallback_neighborhood
 
         price = parse_int(
             self._pick(item, "price", "salePrice", "amount", "priceValue")
@@ -678,6 +682,10 @@ class ApifyListingProvider(ListingProvider):
             source=self.name,
         )
         listing._listing_url = listing_url
+        listing._raw_district = raw_district
+        listing._raw_neighborhood = raw_neighborhood
+        listing._source_url = str(item.get("sourceUrl") or raw.get("sourceUrl") or "").strip()
+        listing._input_index = parse_int(item.get("inputIndex"))
         return listing
 
     def search(self, filters):
@@ -752,11 +760,37 @@ class ApifyListingProvider(ListingProvider):
             if not normalized:
                 continue
 
-            # Tek mahalle doğrudan Sahibinden URL'si ile hedefleniyorsa,
-            # özet kaydındaki konum eksik olsa bile sonucu kaybetme.
-            if single_target and single_target["neighborhood"]:
-                normalized.district = single_target["district"]
-                normalized.neighborhood = single_target["neighborhood"]
+            # Kayıt hangi startUrl'den geldiyse hedefi onunla eşleştir.
+            item_index = getattr(normalized, "_input_index", None)
+            target = None
+            if item_index is not None and 0 <= item_index < len(targets):
+                target = targets[item_index]
+            elif single_target:
+                target = single_target
+
+            if target and target["neighborhood"]:
+                expected_district = self._key(target["district"])
+                expected_neighborhood = self._key(target["neighborhood"])
+
+                actual_district = self._key(
+                    getattr(normalized, "_raw_district", "") or ""
+                )
+                actual_neighborhood = self._key(
+                    getattr(normalized, "_raw_neighborhood", "") or ""
+                )
+
+                # Apify gerçek konumu döndürmüşse, yanlış bölge ilanını kesinlikle alma.
+                if actual_district and actual_district != expected_district:
+                    continue
+                if actual_neighborhood and actual_neighborhood != expected_neighborhood:
+                    continue
+
+                # Konum alanı eksikse yalnızca ilgili startUrl'ün hedefini fallback olarak kullan.
+                if not actual_district:
+                    normalized.district = target["district"]
+                if not actual_neighborhood:
+                    normalized.neighborhood = target["neighborhood"]
+
             elif requested_pairs:
                 current_pair = (
                     self._key(normalized.district),
@@ -939,7 +973,7 @@ def provider_status():
         return {
             "mode": "apify",
             "configured": PROVIDER.configured(),
-            "label": "Apify · Sahibinden mahalle hedefli canlı veri",
+            "label": "Apify · doğrulanmış mahalle URL + gerçek konum filtresi",
         }
 
     if isinstance(PROVIDER, AuthorizedSahibindenProvider):
