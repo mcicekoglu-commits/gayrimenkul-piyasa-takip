@@ -223,10 +223,10 @@ def sahibinden_search_url(district, neighborhood=None):
     district_slug = sahibinden_slug(district)
     if neighborhood:
         neighborhood_slug = sahibinden_slug(neighborhood)
-        # Sahibinden'in mahalle arama URL'sinin sade ve kararlı biçimi.
+        # Sahibinden'in mahalleye özel gerçek arama URL'si.
         return (
             "https://www.sahibinden.com/satilik-daire/"
-            f"istanbul-{district_slug}-{neighborhood_slug}"
+            f"istanbul-{district_slug}-{neighborhood_slug}-{neighborhood_slug}-mh."
         )
     return (
         "https://www.sahibinden.com/satilik-daire/"
@@ -485,9 +485,8 @@ class ApifyListingProvider(ListingProvider):
         self.api_token = os.environ.get("APIFY_API_TOKEN", "").strip()
         self.actor_id = self.ACTOR_ID
         self.timeout = parse_int(os.environ.get("APIFY_TIMEOUT", "300")) or 300
-        # 193 gibi yüksek ilan sayıları için yeterli üst sınır.
-        # Apify ücretsiz planı kendi tarafında yine 20 sonuç/run sınırı uygulayabilir.
-        self.max_results = parse_int(os.environ.get("APIFY_MAX_RESULTS", "500")) or 500
+        # Önce ücretsiz katmanda 20 kaydı eksiksiz doğruluyoruz.
+        self.max_results = 20
 
     def configured(self):
         return bool(self.api_token)
@@ -628,7 +627,8 @@ class ApifyListingProvider(ListingProvider):
             self._pick(item, "grossSize", "grossM2", "grossSquareMeters", "areaGross")
             or self._pick(raw, "grossSize", "grossM2", "grossSquareMeters", "areaGross")
             or self._attribute_value(item, [
-                "m² (Brüt)", "m2 (Brüt)", "Brüt m²", "Brüt m2", "Brüt", "Gross Size", "Gross m2"
+                "m² (Brüt)", "m2 (Brüt)", "Brüt m²", "Brüt m2", "Brüt",
+                "Brüt Alan", "Brüt Metrekare", "Gross Size", "Gross m2", "Gross M²"
             ])
         )
 
@@ -636,14 +636,15 @@ class ApifyListingProvider(ListingProvider):
             self._pick(item, "netSize", "netM2", "netSquareMeters", "areaNet")
             or self._pick(raw, "netSize", "netM2", "netSquareMeters", "areaNet")
             or self._attribute_value(item, [
-                "m² (Net)", "m2 (Net)", "Net m²", "Net m2", "Net", "Net Size"
+                "m² (Net)", "m2 (Net)", "Net m²", "Net m2", "Net",
+                "Net Alan", "Net Metrekare", "Net Size", "Net M²"
             ])
         )
 
         rooms = str(
             self._pick(item, "rooms", "roomCount", "room")
             or self._pick(raw, "rooms", "roomCount", "room")
-            or self._attribute_value(item, ["Oda Sayısı", "Oda", "Rooms", "Room Count"])
+            or self._attribute_value(item, ["Oda Sayısı", "Oda", "Oda + Salon", "Rooms", "Room Count"])
             or ""
         ).strip()
 
@@ -702,9 +703,9 @@ class ApifyListingProvider(ListingProvider):
 
         actor_input = {
             "startUrls": [target["url"] for target in targets],
-            "includeDetails": False,
+            "includeDetails": True,
             "extractPhoneNumbers": False,
-            "maxResults": self.max_results,
+            "maxResults": 20,
         }
 
         raw_items = self._run_actor(actor_input)
@@ -1362,6 +1363,7 @@ def api_provider_status():
             "actor_id": PROVIDER.actor_id,
             "requested_max_results": PROVIDER.max_results,
             "url_targeted": True,
+            "include_details": True,
         })
 
     return jsonify(data)
