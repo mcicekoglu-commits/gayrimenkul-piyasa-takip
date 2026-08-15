@@ -978,6 +978,7 @@ input[type=number],input[type=text],select{width:100%;padding:11px;border:1px so
 .metric .k{font-size:12px;color:#6b7280}
 .metric .v{font-size:20px;font-weight:800;margin-top:3px}
 .table-wrap{overflow-x:auto}
+a{cursor:pointer}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{padding:10px 8px;border-bottom:1px solid #eceff3;text-align:left;white-space:nowrap}
 th{font-size:12px;color:#6b7280}
@@ -1148,15 +1149,31 @@ function bindDistricts(){
     renderNeighborhoodBlock(cb.value);
    }else{
     selectedDistricts.delete(cb.value);
-    delete selectedNeighborhoods[cb.value];
     document.getElementById("nb-"+slugDom(cb.value))?.remove();
+    syncSelectedNeighborhoods();
    }
   };
  });
 }
+function syncSelectedNeighborhoods(){
+ const fresh={};
+ selectedDistricts.forEach(district=>{
+  const wrap=document.getElementById("nb-"+slugDom(district));
+  if(!wrap){
+   fresh[district]=[];
+   return;
+  }
+  fresh[district]=[...wrap.querySelectorAll(".neighborhoodCheck:checked")].map(x=>x.value);
+ });
+ selectedNeighborhoods=fresh;
+}
+
 function renderNeighborhoodBlock(district){
  const id="nb-"+slugDom(district);
- if(document.getElementById(id))return;
+ const existing=document.getElementById(id);
+ if(existing){
+  existing.remove();
+ }
  const list=NEIGHBORHOODS[district]||[];
  const selected=new Set(selectedNeighborhoods[district]||[]);
  const wrap=document.createElement("div");
@@ -1171,9 +1188,10 @@ function renderNeighborhoodBlock(district){
  document.getElementById("neighborhoodArea").appendChild(wrap);
  wrap.querySelectorAll(".neighborhoodCheck").forEach(cb=>{
   cb.onchange=()=>{
-   selectedNeighborhoods[district]=[...wrap.querySelectorAll(".neighborhoodCheck:checked")].map(x=>x.value);
+   syncSelectedNeighborhoods();
   };
  });
+ syncSelectedNeighborhoods();
 }
 
 document.querySelectorAll('input[name="side"]').forEach(el=>{
@@ -1197,6 +1215,7 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
  button.disabled=true;
  button.textContent="Veriler hazırlanıyor…";
 
+ syncSelectedNeighborhoods();
  const formData=new FormData(e.target);
  const payload={
   districts:[...selectedDistricts],
@@ -1239,20 +1258,31 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
    `).join("");
 
   document.getElementById("listingRows").innerHTML=
-   data.listings.map(r=>`
+   data.listings.map(r=>{
+    const href = r.url ? esc(r.url) : "";
+    const place = `${esc(r.district)} · ${esc(r.neighborhood)}`;
+    const titleCell = href
+      ? `<a href="${href}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:underline;font-weight:700">${place}</a>`
+      : place;
+    const priceCell = href
+      ? `<a href="${href}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:underline">${fmtMoney(r.price)}</a>`
+      : fmtMoney(r.price);
+
+    return `
     <tr>
-     <td>${esc(r.district)} · ${esc(r.neighborhood)}</td>
+     <td>${titleCell}</td>
      <td>${esc(r.rooms)}</td>
      <td>${r.gross_m2==null?"-":r.gross_m2+" m²"}</td>
      <td>${r.net_m2==null?"-":r.net_m2+" m²"}</td>
-     <td>${fmtMoney(r.price)}</td>
+     <td>${priceCell}</td>
      <td>${fmtMoney(r.gross_price_m2)}</td>
      <td>${fmtMoney(r.net_price_m2)}</td>
      <td>${r.net_vs_neighborhood_pct==null?"-":(r.net_vs_neighborhood_pct>0?"+":"")+r.net_vs_neighborhood_pct+"%"}</td>
      <td><strong>${r.opportunity_score ?? "-"}</strong><div class="small">${esc(r.opportunity_label||"")}</div></td>
      <td>${esc(r.listing_date)}</td>
     </tr>
-   `).join("");
+   `;
+   }).join("");
 
   resultsCard.classList.remove("hidden");
  }catch(err){
@@ -1337,6 +1367,10 @@ def api_search():
             "provider": PROVIDER.name,
             "analysis": analysis,
             "listings": listing_rows,
+            "debug_filters": {
+                "districts": districts,
+                "neighborhoods": neighborhoods,
+            },
         })
 
     except Exception as exc:
