@@ -655,9 +655,15 @@ class ApifyListingProvider(ListingProvider):
         ).strip()
         listing_date = listed_at[:10] if listed_at else ""
 
-        # Search summary bazı kayıtlarda net m² vermeyebilir; bu ilanı tamamen kaybetmeyelim.
-        if not listing_id or not district or not neighborhood or not price or not gross_m2:
+        # searchSummary kayıtlarında m² / mahalle bazen boş gelebilir.
+        # En az ilan numarası ve fiyat varsa kaydı PAS'a al.
+        if not listing_id or not price:
             return None
+
+        if not district:
+            district = fallback_district
+        if not neighborhood:
+            neighborhood = fallback_neighborhood
 
         listing = Listing(
             id=listing_id,
@@ -703,8 +709,7 @@ class ApifyListingProvider(ListingProvider):
 
         actor_input = {
             "startUrls": [target["url"] for target in targets],
-            "includeDetails": True,
-            "extractPhoneNumbers": False,
+            "enrichment": True,
             "maxResults": 20,
         }
 
@@ -747,9 +752,16 @@ class ApifyListingProvider(ListingProvider):
             if not normalized:
                 continue
 
-            # Yanlış şehir/ilçe/mahalle sonucunu PAS'a sokma.
-            if requested_pairs:
-                current_pair = (self._key(normalized.district), self._key(normalized.neighborhood))
+            # Tek mahalle doğrudan Sahibinden URL'si ile hedefleniyorsa,
+            # özet kaydındaki konum eksik olsa bile sonucu kaybetme.
+            if single_target and single_target["neighborhood"]:
+                normalized.district = single_target["district"]
+                normalized.neighborhood = single_target["neighborhood"]
+            elif requested_pairs:
+                current_pair = (
+                    self._key(normalized.district),
+                    self._key(normalized.neighborhood),
+                )
                 if current_pair not in requested_pairs:
                     continue
 
@@ -759,10 +771,12 @@ class ApifyListingProvider(ListingProvider):
 
             if requested_rooms and normalized.rooms and normalized.rooms != requested_rooms:
                 continue
-            if min_m2 is not None and normalized.gross_m2 < min_m2:
-                continue
-            if max_m2 is not None and normalized.gross_m2 > max_m2:
-                continue
+            if min_m2 is not None:
+                if normalized.gross_m2 is None or normalized.gross_m2 < min_m2:
+                    continue
+            if max_m2 is not None:
+                if normalized.gross_m2 is None or normalized.gross_m2 > max_m2:
+                    continue
             if min_price is not None and normalized.price < min_price:
                 continue
             if max_price is not None and normalized.price > max_price:
