@@ -1432,7 +1432,7 @@ th{font-size:12px;color:#6b7280}
 <body>
 <div class="container">
 <h1>HLF PAS</h1>
-<div class="subtitle">Piyasa Arama Sistemi <span class="small">v2.2</span></div>
+<div class="subtitle">Piyasa Arama Sistemi <span class="small">v2.3</span></div>
 
 <div class="card">
 <div class="notice">
@@ -1642,6 +1642,39 @@ document.querySelectorAll('input[name="side"]').forEach(el=>{
  el.addEventListener("change",renderDistricts);
 });
 
+// iPhone/Safari uyumluluğu:
+// fetch() yerine XMLHttpRequest kullanıyoruz. Bazı Safari sürümlerinde
+// fetch(relativeUrl, options) DOMException:
+// "The string did not match the expected pattern." üretebiliyor.
+function postJson(path,payload){
+ return new Promise((resolve,reject)=>{
+  try{
+   const xhr=new XMLHttpRequest();
+   const url=window.location.origin + path;
+   xhr.open("POST",url,true);
+   xhr.setRequestHeader("Content-Type","application/json; charset=UTF-8");
+   xhr.setRequestHeader("Accept","application/json");
+   xhr.onreadystatechange=()=>{
+    if(xhr.readyState!==4)return;
+    let data={};
+    try{
+     data=xhr.responseText ? JSON.parse(xhr.responseText) : {};
+    }catch(parseErr){
+     reject(new Error("Sunucu geçerli JSON döndürmedi. HTTP "+xhr.status));
+     return;
+    }
+    resolve({ok:xhr.status>=200&&xhr.status<300,status:xhr.status,data});
+   };
+   xhr.onerror=()=>reject(new Error("Sunucuya bağlantı kurulamadı."));
+   xhr.ontimeout=()=>reject(new Error("İstek zaman aşımına uğradı."));
+   xhr.timeout=360000;
+   xhr.send(JSON.stringify(payload));
+  }catch(err){
+   reject(new Error("İstek hazırlanamadı: "+(err.message||String(err))));
+  }
+ });
+}
+
 document.getElementById("pasForm").addEventListener("submit",async e=>{
  e.preventDefault();
  const errorBox=document.getElementById("errorBox");
@@ -1678,13 +1711,9 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
  };
 
  try{
-  const response=await fetch("/api/search",{
-   method:"POST",
-   headers:{"Content-Type":"application/json"},
-   body:JSON.stringify(payload)
-  });
-  const data=await response.json();
-  if(!response.ok||!data.ok)throw new Error(data.error||"Arama başarısız.");
+  const result=await postJson("/api/search",payload);
+  const data=result.data;
+  if(!result.ok||!data.ok)throw new Error(data.error||("Arama başarısız. HTTP "+result.status));
 
   document.getElementById("providerBadge").textContent=data.provider;
   document.getElementById("mCount").textContent=data.analysis.count;
@@ -1777,13 +1806,9 @@ document.getElementById("syncButton").addEventListener("click",async ()=>{
  button.textContent="Yeni ilanlar kontrol ediliyor…";
 
  try{
-  const response=await fetch("/api/sync",{
-   method:"POST",
-   headers:{"Content-Type":"application/json"},
-   body:JSON.stringify({district,neighborhood})
-  });
-  const data=await response.json();
-  if(!response.ok||!data.ok)throw new Error(data.error||"Güncelleme başarısız.");
+  const result=await postJson("/api/sync",{district,neighborhood});
+  const data=result.data;
+  if(!result.ok||!data.ok)throw new Error(data.error||("Güncelleme başarısız. HTTP "+result.status));
 
   document.getElementById("syncText").textContent=
    `${district} · ${neighborhood}: ${data.received} sonuç alındı, `+
