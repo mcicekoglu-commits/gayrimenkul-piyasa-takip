@@ -1432,7 +1432,7 @@ th{font-size:12px;color:#6b7280}
 <body>
 <div class="container">
 <h1>HLF PAS</h1>
-<div class="subtitle">Piyasa Arama Sistemi</div>
+<div class="subtitle">Piyasa Arama Sistemi <span class="small">v2.1</span></div>
 
 <div class="card">
 <div class="notice">
@@ -1790,7 +1790,11 @@ document.getElementById("syncButton").addEventListener("click",async ()=>{
    `${data.new} yeni ilan eklendi, ${data.updated} mevcut ilan güncellendi.`;
   syncBox.classList.remove("hidden");
 
-  document.getElementById("pasForm").requestSubmit();
+  // iPhone/Safari bazı sürümlerde requestSubmit() çağrısında
+  // "The string did not match the expected pattern." DOMException verebiliyor.
+  // Formun mevcut submit handler'ını doğrudan event ile tetikliyoruz.
+  const form=document.getElementById("pasForm");
+  form.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));
  }catch(err){
   document.getElementById("errorText").textContent=err.message||"Güncelleme hatası.";
   errorBox.classList.remove("hidden");
