@@ -822,7 +822,7 @@ class ApifyListingProvider(ListingProvider):
       clearpath~sahibinden-scraper-pro
 
     Maliyet/Test modu:
-      enrichment=False
+      enrichment=True
       includeDetails=False
       extractPhoneNumbers=False
       maxResults<=3
@@ -1162,7 +1162,7 @@ class ApifyListingProvider(ListingProvider):
             # varsayılan olarak TRUE. Açık bırakılırsa detay + telefon
             # zenginleştirmesi ve ek maliyet devreye girebilir.
             # Test modunda kesin olarak kapatıyoruz.
-            "enrichment": False,
+            "enrichment": True,
 
             # Eski/yedek uyumluluk anahtarları da kapalı kalsın.
             "includeDetails": False,
@@ -1445,7 +1445,7 @@ th{font-size:12px;color:#6b7280}
 <body>
 <div class="container">
 <h1>HLF PAS</h1>
-<div class="subtitle">Piyasa Arama Sistemi <span class="small">v2.6-test3</span></div>
+<div class="subtitle">Piyasa Arama Sistemi <span class="small">v2.7-test3</span></div>
 
 <div class="card">
 <div class="notice">
