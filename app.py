@@ -231,7 +231,7 @@ def sahibinden_search_url(district, neighborhood=None):
         neighborhood_slug = sahibinden_slug(neighborhood)
         return (
             "https://www.sahibinden.com/satilik-daire/"
-            f"istanbul-{district_slug}-{neighborhood_slug}-{neighborhood_slug}-mh."
+            f"istanbul-{district_slug}-{neighborhood_slug}-{neighborhood_slug}-mah."
         )
     return (
         "https://www.sahibinden.com/satilik-daire/"
@@ -1150,6 +1150,7 @@ class ApifyListingProvider(ListingProvider):
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
         start_url = sahibinden_search_url(district, neighborhood)
+        print(f"HLF PAS Apify sync URL: {start_url}", flush=True)
 
         # Search Scraper Pro maliyet güvenliği:
         # Güncel input şemasında `enrichment` varsayılan TRUE olduğundan
@@ -1172,6 +1173,7 @@ class ApifyListingProvider(ListingProvider):
         }
 
         raw_items = self._run_actor(actor_input)
+        print(f"HLF PAS Apify raw result count: {len(raw_items)}", flush=True)
 
         listings = []
         seen_ids = set()
@@ -1443,7 +1445,7 @@ th{font-size:12px;color:#6b7280}
 <body>
 <div class="container">
 <h1>HLF PAS</h1>
-<div class="subtitle">Piyasa Arama Sistemi <span class="small">v2.5-test3</span></div>
+<div class="subtitle">Piyasa Arama Sistemi <span class="small">v2.6-test3</span></div>
 
 <div class="card">
 <div class="notice">
