@@ -229,11 +229,9 @@ def sahibinden_search_url(district, neighborhood=None):
     district_slug = sahibinden_slug(district)
     if neighborhood:
         neighborhood_slug = sahibinden_slug(neighborhood)
-        # Search Scraper Pro için sade, yerel Türkçe Sahibinden arama URL'si.
-        # Örnek: /satilik-daire/istanbul-kadikoy-suadiye
         return (
             "https://www.sahibinden.com/satilik-daire/"
-            f"istanbul-{district_slug}-{neighborhood_slug}"
+            f"istanbul-{district_slug}-{neighborhood_slug}-{neighborhood_slug}-mh."
         )
     return (
         "https://www.sahibinden.com/satilik-daire/"
@@ -1445,7 +1443,7 @@ th{font-size:12px;color:#6b7280}
 <body>
 <div class="container">
 <h1>HLF PAS</h1>
-<div class="subtitle">Piyasa Arama Sistemi <span class="small">v2.4-test3</span></div>
+<div class="subtitle">Piyasa Arama Sistemi <span class="small">v2.5-test3</span></div>
 
 <div class="card">
 <div class="notice">
