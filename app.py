@@ -823,9 +823,11 @@ class ApifyListingProvider(ListingProvider):
     Actor:
       clearpath~sahibinden-scraper-pro
 
-    Maliyet modu:
+    Maliyet/Test modu:
+      enrichment=False
       includeDetails=False
       extractPhoneNumbers=False
+      maxResults<=3
 
     Böylece yalnızca base/search-summary çıktısı kullanılır.
     Telefon ve enriched-detail add-on çağrılmaz.
@@ -841,11 +843,12 @@ class ApifyListingProvider(ListingProvider):
     def __init__(self):
         self.api_token = os.environ.get("APIFY_API_TOKEN", "").strip()
         self.actor_id = self.ACTOR_ID
+        # TEST MODU: Sistem oturana kadar her güncellemede en fazla 3 ilan.
+        # Daha sonra bu üst sınırı artırabiliriz.
         self.max_results = parse_int(
-            os.environ.get("PAS_SYNC_MAX_RESULTS", "50")
-        ) or 50
-        # Test ve maliyet kontrolü için güvenli üst sınır.
-        self.max_results = max(1, min(self.max_results, 200))
+            os.environ.get("PAS_SYNC_MAX_RESULTS", "3")
+        ) or 3
+        self.max_results = max(1, min(self.max_results, 3))
         self.timeout = parse_int(os.environ.get("APIFY_TIMEOUT", "300")) or 300
 
     def configured(self):
@@ -1150,13 +1153,23 @@ class ApifyListingProvider(ListingProvider):
 
         start_url = sahibinden_search_url(district, neighborhood)
 
-        # Search Scraper Pro'nun güncel ve doğru input anahtarları.
-        # includeDetails=False => enriched add-on yok.
-        # extractPhoneNumbers=False => telefon çekilmez.
+        # Search Scraper Pro maliyet güvenliği:
+        # Güncel input şemasında `enrichment` varsayılan TRUE olduğundan
+        # burada açıkça FALSE gönderiyoruz.
         actor_input = {
             "startUrls": [start_url],
+
+            # ÖNEMLİ: Bu Actor'ın güncel şemasında `enrichment`
+            # varsayılan olarak TRUE. Açık bırakılırsa detay + telefon
+            # zenginleştirmesi ve ek maliyet devreye girebilir.
+            # Test modunda kesin olarak kapatıyoruz.
+            "enrichment": False,
+
+            # Eski/yedek uyumluluk anahtarları da kapalı kalsın.
             "includeDetails": False,
             "extractPhoneNumbers": False,
+
+            # Sistem oturana kadar maksimum 3 ilan.
             "maxResults": self.max_results,
         }
 
@@ -1432,7 +1445,7 @@ th{font-size:12px;color:#6b7280}
 <body>
 <div class="container">
 <h1>HLF PAS</h1>
-<div class="subtitle">Piyasa Arama Sistemi <span class="small">v2.3</span></div>
+<div class="subtitle">Piyasa Arama Sistemi <span class="small">v2.4-test3</span></div>
 
 <div class="card">
 <div class="notice">
