@@ -229,10 +229,11 @@ def sahibinden_search_url(district, neighborhood=None):
     district_slug = sahibinden_slug(district)
     if neighborhood:
         neighborhood_slug = sahibinden_slug(neighborhood)
-        # Sahibinden'in mahalleye özel gerçek arama URL'si.
+        # Search Scraper Pro için sade, yerel Türkçe Sahibinden arama URL'si.
+        # Örnek: /satilik-daire/istanbul-kadikoy-suadiye
         return (
             "https://www.sahibinden.com/satilik-daire/"
-            f"istanbul-{district_slug}-{neighborhood_slug}-{neighborhood_slug}-mh."
+            f"istanbul-{district_slug}-{neighborhood_slug}"
         )
     return (
         "https://www.sahibinden.com/satilik-daire/"
@@ -253,6 +254,7 @@ class Listing:
     net_m2: int
     rooms: str
     listing_date: str
+    building_age: int | None = None
     source: str = "demo"
 
     @property
@@ -305,6 +307,7 @@ def init_db():
                     net_m2 INTEGER,
                     rooms TEXT NOT NULL DEFAULT '',
                     listing_date TEXT NOT NULL DEFAULT '',
+                    building_age INTEGER,
                     source TEXT NOT NULL DEFAULT '',
                     url TEXT NOT NULL DEFAULT '',
                     active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -312,6 +315,12 @@ def init_db():
                     last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
+            """)
+            # Mevcut Railway/Postgres tablosu daha önce oluşturulduysa
+            # bina yaşı kolonunu güvenli biçimde ekle.
+            cur.execute("""
+                ALTER TABLE pas_listings
+                ADD COLUMN IF NOT EXISTS building_age INTEGER
             """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_pas_listings_location
@@ -344,6 +353,8 @@ def _listing_matches_filters(row, filters):
     net_m2_max = parse_int(filters.get("net_m2_max"))
     gross_m2_min = parse_int(filters.get("gross_m2_min"))
     gross_m2_max = parse_int(filters.get("gross_m2_max"))
+    building_age_min = parse_int(filters.get("building_age_min"))
+    building_age_max = parse_int(filters.get("building_age_max"))
 
     if requested_rooms and row.rooms and row.rooms != requested_rooms:
         return False
@@ -367,6 +378,13 @@ def _listing_matches_filters(row, filters):
             return False
     if gross_m2_max is not None:
         if not row.gross_price_m2 or row.gross_price_m2 > gross_m2_max:
+            return False
+
+    if building_age_min is not None:
+        if row.building_age is None or row.building_age < building_age_min:
+            return False
+    if building_age_max is not None:
+        if row.building_age is None or row.building_age > building_age_max:
             return False
 
     return True
@@ -395,12 +413,12 @@ def save_listings_to_db(listings):
                 cur.execute("""
                     INSERT INTO pas_listings (
                         id, district, neighborhood, title, price,
-                        gross_m2, net_m2, rooms, listing_date,
+                        gross_m2, net_m2, rooms, listing_date, building_age,
                         source, url, active, first_seen, last_seen, updated_at
                     )
                     VALUES (
                         %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
                         %s, %s, TRUE, NOW(), NOW(), NOW()
                     )
                     ON CONFLICT (id) DO UPDATE SET
@@ -412,6 +430,7 @@ def save_listings_to_db(listings):
                         net_m2 = EXCLUDED.net_m2,
                         rooms = EXCLUDED.rooms,
                         listing_date = EXCLUDED.listing_date,
+                        building_age = EXCLUDED.building_age,
                         source = EXCLUDED.source,
                         url = CASE
                             WHEN EXCLUDED.url <> '' THEN EXCLUDED.url
@@ -430,6 +449,7 @@ def save_listings_to_db(listings):
                     item.net_m2,
                     item.rooms or "",
                     item.listing_date or "",
+                    item.building_age,
                     item.source or "",
                     url,
                 ))
@@ -463,7 +483,7 @@ def load_listings_from_db(filters):
             cur.execute("""
                 SELECT
                     id, district, neighborhood, title, price,
-                    gross_m2, net_m2, rooms, listing_date, source, url
+                    gross_m2, net_m2, rooms, listing_date, building_age, source, url
                 FROM pas_listings
                 WHERE active = TRUE
                   AND district = ANY(%s)
@@ -501,6 +521,7 @@ def load_listings_from_db(filters):
             net_m2=parse_int(row["net_m2"]),
             rooms=row["rooms"] or "",
             listing_date=row["listing_date"] or "",
+            building_age=parse_int(row["building_age"]),
             source=row["source"] or "cache",
         )
         item._listing_url = row["url"] or ""
@@ -603,6 +624,8 @@ class DemoListingProvider(ListingProvider):
         net_m2_max = parse_int(filters.get("net_m2_max"))
         gross_m2_min = parse_int(filters.get("gross_m2_min"))
         gross_m2_max = parse_int(filters.get("gross_m2_max"))
+        building_age_min = parse_int(filters.get("building_age_min"))
+        building_age_max = parse_int(filters.get("building_age_max"))
 
         rows = []
 
@@ -625,6 +648,7 @@ class DemoListingProvider(ListingProvider):
                     price = int(round((price_m2 * gross) / 50000) * 50000)
 
                     listed = date.today() - timedelta(days=rng.randint(0, 45))
+                    building_age = rng.randint(0, 35)
 
                     row = Listing(
                         id=f"DEMO-{stable_seed(district + neighborhood + str(i))}",
@@ -636,6 +660,7 @@ class DemoListingProvider(ListingProvider):
                         net_m2=net,
                         rooms=rooms,
                         listing_date=listed.isoformat(),
+                        building_age=building_age,
                     )
 
                     if requested_rooms and requested_rooms != row.rooms:
@@ -655,6 +680,10 @@ class DemoListingProvider(ListingProvider):
                     if gross_m2_min is not None and row.gross_price_m2 < gross_m2_min:
                         continue
                     if gross_m2_max is not None and row.gross_price_m2 > gross_m2_max:
+                        continue
+                    if building_age_min is not None and row.building_age < building_age_min:
+                        continue
+                    if building_age_max is not None and row.building_age > building_age_max:
                         continue
 
                     rows.append(row)
@@ -794,17 +823,16 @@ class ApifyListingProvider(ListingProvider):
     Actor:
       clearpath~sahibinden-scraper-pro
 
-    Normal PAS filtrelemesi bu Actor'ı ÇALIŞTIRMAZ.
+    Maliyet modu:
+      includeDetails=False
+      extractPhoneNumbers=False
+
+    Böylece yalnızca base/search-summary çıktısı kullanılır.
+    Telefon ve enriched-detail add-on çağrılmaz.
+
+    Normal PAS filtrelemesi Actor'ı çalıştırmaz.
     Actor yalnızca /api/sync ile, kullanıcının açıkça
     "Yeni ilanları güncelle" demesi halinde çalışır.
-
-    Telefon/enrichment kapalıdır.
-    Tek seferde yalnızca TEK mahalle güncellenir.
-
-    Railway Variables:
-      APIFY_API_TOKEN=...
-      PAS_SYNC_MAX_RESULTS=200
-      APIFY_TIMEOUT=300
     """
 
     name = "apify_sync"
@@ -814,9 +842,10 @@ class ApifyListingProvider(ListingProvider):
         self.api_token = os.environ.get("APIFY_API_TOKEN", "").strip()
         self.actor_id = self.ACTOR_ID
         self.max_results = parse_int(
-            os.environ.get("PAS_SYNC_MAX_RESULTS", "200")
-        ) or 200
-        self.max_results = max(1, min(self.max_results, 500))
+            os.environ.get("PAS_SYNC_MAX_RESULTS", "50")
+        ) or 50
+        # Test ve maliyet kontrolü için güvenli üst sınır.
+        self.max_results = max(1, min(self.max_results, 200))
         self.timeout = parse_int(os.environ.get("APIFY_TIMEOUT", "300")) or 300
 
     def configured(self):
@@ -838,7 +867,7 @@ class ApifyListingProvider(ListingProvider):
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self.api_token}",
-                "User-Agent": "HLF-PAS/2.0",
+                "User-Agent": "HLF-PAS/2.1",
             },
             method="POST",
         )
@@ -860,7 +889,7 @@ class ApifyListingProvider(ListingProvider):
 
         except HTTPError as exc:
             try:
-                detail = exc.read().decode("utf-8", errors="ignore")[:800]
+                detail = exc.read().decode("utf-8", errors="ignore")[:1200]
             except Exception:
                 detail = ""
             raise RuntimeError(
@@ -876,17 +905,81 @@ class ApifyListingProvider(ListingProvider):
             ) from exc
 
     @staticmethod
-    def _pick(item, *keys):
+    def _pick(mapping, *keys):
+        if not isinstance(mapping, dict):
+            return None
         for key in keys:
-            value = item.get(key)
+            value = mapping.get(key)
             if value not in (None, ""):
                 return value
         return None
 
+    @staticmethod
+    def _norm_key(value):
+        text = str(value or "").casefold()
+        replacements = {
+            "ı": "i", "ğ": "g", "ü": "u",
+            "ş": "s", "ö": "o", "ç": "c",
+            "²": "2",
+        }
+        for src, dst in replacements.items():
+            text = text.replace(src, dst)
+        return re.sub(r"[^a-z0-9]+", "", text)
+
+    def _attribute_value(self, item, *aliases):
+        """
+        Search-summary çıktısındaki farklı attribute şekillerinden
+        Brüt m² / Net m² / Oda Sayısı gibi alanları bulur.
+        """
+        raw = item.get("rawSummary") if isinstance(item.get("rawSummary"), dict) else {}
+
+        candidates = [
+            item.get("summaryAttributes"),
+            item.get("searchAttributes"),
+            item.get("attributes"),
+            raw.get("summaryAttributes"),
+            raw.get("searchAttributes"),
+            raw.get("attributes"),
+        ]
+
+        wanted = {self._norm_key(x) for x in aliases}
+
+        for source in candidates:
+            if isinstance(source, dict):
+                for key, value in source.items():
+                    if self._norm_key(key) in wanted and value not in (None, ""):
+                        return value
+
+            elif isinstance(source, list):
+                for row in source:
+                    if not isinstance(row, dict):
+                        continue
+                    key = (
+                        row.get("name")
+                        or row.get("label")
+                        or row.get("title")
+                        or row.get("key")
+                    )
+                    value = (
+                        row.get("value")
+                        or row.get("text")
+                        or row.get("displayValue")
+                    )
+                    if self._norm_key(key) in wanted and value not in (None, ""):
+                        return value
+
+        return None
+
     def _normalize_item(self, item, fallback_district, fallback_neighborhood):
         raw = item.get("rawSummary") if isinstance(item.get("rawSummary"), dict) else {}
-        location = item.get("location") if isinstance(item.get("location"), dict) else {}
-        address = item.get("address") if isinstance(item.get("address"), dict) else {}
+
+        location = item.get("location")
+        if not isinstance(location, dict):
+            location = {}
+
+        address_obj = item.get("address")
+        if not isinstance(address_obj, dict):
+            address_obj = {}
 
         listing_id = str(
             self._pick(item, "id", "listingId", "adId", "classifiedId")
@@ -899,6 +992,9 @@ class ApifyListingProvider(ListingProvider):
             or self._pick(raw, "url", "listingUrl", "href", "sourceUrl")
             or ""
         ).strip()
+
+        if listing_url.startswith("/"):
+            listing_url = "https://www.sahibinden.com" + listing_url
 
         if not listing_id and listing_url:
             match = re.search(r"(\d{8,})", listing_url)
@@ -914,8 +1010,8 @@ class ApifyListingProvider(ListingProvider):
         district = normalize_place_name(
             self._pick(item, "district", "districtName", "town", "ilce")
             or self._pick(raw, "district", "districtName", "town", "ilce")
-            or self._pick(location, "district", "districtName")
-            or self._pick(address, "district", "districtName")
+            or self._pick(location, "district", "districtName", "town")
+            or self._pick(address_obj, "district", "districtName", "town")
             or fallback_district
         )
 
@@ -928,67 +1024,121 @@ class ApifyListingProvider(ListingProvider):
                 raw,
                 "quarter", "neighborhood", "neighborhoodName", "mahalle"
             )
-            or self._pick(location, "quarter", "neighborhood", "neighborhoodName")
-            or self._pick(address, "quarter", "neighborhood", "neighborhoodName")
+            or self._pick(
+                location,
+                "quarter", "neighborhood", "neighborhoodName"
+            )
+            or self._pick(
+                address_obj,
+                "quarter", "neighborhood", "neighborhoodName"
+            )
             or fallback_neighborhood
         )
 
         price = parse_int(
-            self._pick(item, "price", "salePrice", "amount", "priceValue")
-            or self._pick(raw, "price", "salePrice", "amount", "priceValue")
+            self._pick(
+                item,
+                "price", "salePrice", "amount", "priceValue",
+                "formattedPrice"
+            )
+            or self._pick(
+                raw,
+                "price", "salePrice", "amount", "priceValue",
+                "formattedPrice"
+            )
         )
 
         gross_m2 = parse_int(
             self._pick(
                 item,
-                "grossSize", "grossM2", "grossSquareMeters",
-                "areaGross", "size", "m2"
+                "grossSize", "grossM2", "gross_m2", "grossSquareMeters",
+                "areaGross", "size", "m2", "squareMeters"
             )
             or self._pick(
                 raw,
-                "grossSize", "grossM2", "grossSquareMeters",
-                "areaGross", "size", "m2"
+                "grossSize", "grossM2", "gross_m2", "grossSquareMeters",
+                "areaGross", "size", "m2", "squareMeters"
+            )
+            or self._attribute_value(
+                item,
+                "m² (Brüt)", "m2 (Brüt)", "Brüt m²", "Brüt m2",
+                "Brüt", "m²", "m2"
             )
         )
 
         net_m2 = parse_int(
             self._pick(
                 item,
-                "netSize", "netM2", "netSquareMeters", "areaNet"
+                "netSize", "netM2", "net_m2", "netSquareMeters", "areaNet"
             )
             or self._pick(
                 raw,
-                "netSize", "netM2", "netSquareMeters", "areaNet"
+                "netSize", "netM2", "net_m2", "netSquareMeters", "areaNet"
+            )
+            or self._attribute_value(
+                item,
+                "m² (Net)", "m2 (Net)", "Net m²", "Net m2", "Net"
             )
         )
 
-        rooms = str(
-            self._pick(item, "rooms", "roomCount", "room")
-            or self._pick(raw, "rooms", "roomCount", "room")
+        rooms_value = (
+            self._pick(item, "rooms", "roomCount", "room", "roomInfo")
+            or self._pick(raw, "rooms", "roomCount", "room", "roomInfo")
+            or self._attribute_value(
+                item,
+                "Oda Sayısı", "Oda", "Oda Sayisi", "roomCount", "rooms"
+            )
             or ""
-        ).strip()
+        )
+        rooms = str(rooms_value).strip()
+
+        building_age = parse_int(
+            self._pick(
+                item,
+                "buildingAge", "building_age", "buildingAgeYears",
+                "ageOfBuilding", "buildingYearAge"
+            )
+            or self._pick(
+                raw,
+                "buildingAge", "building_age", "buildingAgeYears",
+                "ageOfBuilding", "buildingYearAge"
+            )
+            or self._attribute_value(
+                item,
+                "Bina Yaşı", "Bina Yasi", "Bina Yaşı (Yıl)",
+                "Bina Yaşı (Yil)", "buildingAge", "Building Age"
+            )
+        )
 
         listed_at = str(
-            self._pick(item, "listedAt", "listingDate", "createdAt", "date")
-            or self._pick(raw, "listedAt", "listingDate", "createdAt", "date")
+            self._pick(
+                item,
+                "listedAt", "listingDate", "createdAt", "date", "dateCreated"
+            )
+            or self._pick(
+                raw,
+                "listedAt", "listingDate", "createdAt", "date", "dateCreated"
+            )
             or ""
         ).strip()
         listing_date = listed_at[:10] if listed_at else ""
 
-        # Veri kalitesi için temel alanlar gerekli.
-        if not listing_id or not district or not neighborhood or not price:
+        # Bir ilanı kaydetmek için kimlik ve fiyat temel olarak yeterlidir.
+        # İlçe/mahalle, seçilen hedef mahalleden fallback edilir.
+        if not listing_id or not price:
             return None
 
         listing = Listing(
             id=listing_id,
-            district=district,
-            neighborhood=neighborhood,
+            district=district or fallback_district,
+            neighborhood=neighborhood or fallback_neighborhood,
             title=title,
             price=price,
             gross_m2=gross_m2,
             net_m2=net_m2,
             rooms=rooms,
             listing_date=listing_date,
+            building_age=building_age,
             source="sahibinden-scraper-pro",
         )
         listing._listing_url = listing_url
@@ -1000,9 +1150,13 @@ class ApifyListingProvider(ListingProvider):
 
         start_url = sahibinden_search_url(district, neighborhood)
 
+        # Search Scraper Pro'nun güncel ve doğru input anahtarları.
+        # includeDetails=False => enriched add-on yok.
+        # extractPhoneNumbers=False => telefon çekilmez.
         actor_input = {
             "startUrls": [start_url],
-            "enrichment": False,
+            "includeDetails": False,
+            "extractPhoneNumbers": False,
             "maxResults": self.max_results,
         }
 
@@ -1023,14 +1177,19 @@ class ApifyListingProvider(ListingProvider):
             if not normalized:
                 continue
 
-            # Actor farklı/üst bölge sonucu döndürürse istenen mahallede tut.
-            if sahibinden_slug(normalized.district) != sahibinden_slug(district):
+            # Actor gerçek konum döndürdüyse yanlış mahalleyi kabul etme.
+            # Konum yoksa hedef mahalle fallback edildiği için kayıt korunur.
+            actual_district = sahibinden_slug(normalized.district)
+            actual_neighborhood = sahibinden_slug(normalized.neighborhood)
+
+            if actual_district and actual_district != sahibinden_slug(district):
                 continue
-            if sahibinden_slug(normalized.neighborhood) != sahibinden_slug(neighborhood):
+            if actual_neighborhood and actual_neighborhood != sahibinden_slug(neighborhood):
                 continue
 
             if str(normalized.id) in seen_ids:
                 continue
+
             seen_ids.add(str(normalized.id))
             listings.append(normalized)
 
@@ -1084,6 +1243,7 @@ def analyze(listings):
             "avg_gross_m2_price": None,
             "median_net_m2_price": None,
             "avg_net_m2_price": None,
+            "avg_building_age": None,
             "q1_gross_m2_price": None,
             "q3_gross_m2_price": None,
             "by_neighborhood": [],
@@ -1092,6 +1252,10 @@ def analyze(listings):
     prices = [x.price for x in listings if x.price]
     m2s = [x.gross_price_m2 for x in listings if x.gross_price_m2]
     net_m2s = [x.net_price_m2 for x in listings if x.net_price_m2]
+    building_ages = [
+        x.building_age for x in listings
+        if x.building_age is not None
+    ]
 
     grouped = {}
     for x in listings:
@@ -1102,6 +1266,10 @@ def analyze(listings):
     for key, rows in grouped.items():
         row_prices = [x.price for x in rows if x.price]
         row_m2s = [x.gross_price_m2 for x in rows if x.gross_price_m2]
+        row_building_ages = [
+            x.building_age for x in rows
+            if x.building_age is not None
+        ]
         if not row_prices or not row_m2s:
             continue
         by_neighborhood.append({
@@ -1109,6 +1277,10 @@ def analyze(listings):
             "count": len(rows),
             "median_price": round(statistics.median(row_prices)),
             "median_gross_m2_price": round(statistics.median(row_m2s)),
+            "avg_building_age": (
+                round(statistics.mean(row_building_ages), 1)
+                if row_building_ages else None
+            ),
         })
 
     by_neighborhood.sort(key=lambda x: x["median_gross_m2_price"], reverse=True)
@@ -1121,6 +1293,10 @@ def analyze(listings):
         "avg_gross_m2_price": round(statistics.mean(m2s)) if m2s else None,
         "median_net_m2_price": round(statistics.median(net_m2s)) if net_m2s else None,
         "avg_net_m2_price": round(statistics.mean(net_m2s)) if net_m2s else None,
+        "avg_building_age": (
+            round(statistics.mean(building_ages), 1)
+            if building_ages else None
+        ),
         "q1_gross_m2_price": percentile(m2s, 0.25),
         "q3_gross_m2_price": percentile(m2s, 0.75),
         "by_neighborhood": by_neighborhood,
@@ -1306,6 +1482,11 @@ Yeni ilanlar yalnızca "Yeni ilanları güncelle" düğmesiyle alınır.
 <div><label class="field">Max Fiyat</label><input name="max_price" type="number" min="0"></div>
 </div>
 
+<div class="pair">
+<div><label class="field">Min Bina Yaşı</label><input name="building_age_min" type="number" min="0"></div>
+<div><label class="field">Max Bina Yaşı</label><input name="building_age_max" type="number" min="0"></div>
+</div>
+
 <details>
 <summary>Net m² satış fiyatı</summary>
 <div class="pair" style="padding-bottom:10px">
@@ -1349,12 +1530,13 @@ Yeni ilanlar yalnızca "Yeni ilanları güncelle" düğmesiyle alınır.
 <div class="metric"><div class="k">Ort. fiyat</div><div class="v" id="mAvgPrice">-</div></div>
 <div class="metric"><div class="k">Medyan brüt TL/m²</div><div class="v" id="mMedianM2">-</div></div>
 <div class="metric"><div class="k">Medyan net TL/m²</div><div class="v" id="mMedianNetM2">-</div></div>
+<div class="metric"><div class="k">Ort. bina yaşı</div><div class="v" id="mAvgBuildingAge">-</div></div>
 </div>
 
 <div class="title" style="margin-top:16px">Mahalle karşılaştırması</div>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Bölge</th><th>İlan</th><th>Medyan fiyat</th><th>Medyan TL/m²</th></tr></thead>
+<thead><tr><th>Bölge</th><th>İlan</th><th>Medyan fiyat</th><th>Medyan TL/m²</th><th>Ort. bina yaşı</th></tr></thead>
 <tbody id="neighborhoodStats"></tbody>
 </table>
 </div>
@@ -1362,7 +1544,7 @@ Yeni ilanlar yalnızca "Yeni ilanları güncelle" düğmesiyle alınır.
 <div class="title" style="margin-top:16px">İlanlar</div>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Mahalle</th><th>Oda</th><th>Brüt</th><th>Net</th><th>Fiyat</th><th>Brüt TL/m²</th><th>Net TL/m²</th><th>Mahalleye göre</th><th>PAS puanı</th><th>Tarih</th></tr></thead>
+<thead><tr><th>Mahalle</th><th>Oda</th><th>Bina yaşı</th><th>Brüt</th><th>Net</th><th>Fiyat</th><th>Brüt TL/m²</th><th>Net TL/m²</th><th>Mahalleye göre</th><th>PAS puanı</th><th>Tarih</th></tr></thead>
 <tbody id="listingRows"></tbody>
 </table>
 </div>
@@ -1487,6 +1669,8 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
   max_m2:formData.get("max_m2")||"",
   min_price:formData.get("min_price")||"",
   max_price:formData.get("max_price")||"",
+  building_age_min:formData.get("building_age_min")||"",
+  building_age_max:formData.get("building_age_max")||"",
   net_m2_min:formData.get("net_m2_min")||"",
   net_m2_max:formData.get("net_m2_max")||"",
   gross_m2_min:formData.get("gross_m2_min")||"",
@@ -1508,6 +1692,8 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
   document.getElementById("mAvgPrice").textContent=fmtMoney(data.analysis.avg_price);
   document.getElementById("mMedianM2").textContent=fmtMoney(data.analysis.median_gross_m2_price);
   document.getElementById("mMedianNetM2").textContent=fmtMoney(data.analysis.median_net_m2_price);
+  document.getElementById("mAvgBuildingAge").textContent=
+   data.analysis.avg_building_age==null ? "-" : data.analysis.avg_building_age+" yıl";
 
   document.getElementById("neighborhoodStats").innerHTML=
    data.analysis.by_neighborhood.map(r=>`
@@ -1516,6 +1702,7 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
      <td>${r.count}</td>
      <td>${fmtMoney(r.median_price)}</td>
      <td>${fmtMoney(r.median_gross_m2_price)}</td>
+     <td>${r.avg_building_age==null?"-":r.avg_building_age+" yıl"}</td>
     </tr>
    `).join("");
 
@@ -1529,6 +1716,7 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
     <tr class="${href?"listing-clickable":""}" ${href?`data-url="${href}"`:""}>
      <td><strong>${place}</strong><div class="small">${openText}</div></td>
      <td>${esc(r.rooms)}</td>
+     <td>${r.building_age==null?"-":r.building_age+" yıl"}</td>
      <td>${r.gross_m2==null?"-":r.gross_m2+" m²"}</td>
      <td>${r.net_m2==null?"-":r.net_m2+" m²"}</td>
      <td>${fmtMoney(r.price)}</td>
@@ -1662,6 +1850,8 @@ def api_search():
             "max_m2": payload.get("max_m2", ""),
             "min_price": payload.get("min_price", ""),
             "max_price": payload.get("max_price", ""),
+            "building_age_min": payload.get("building_age_min", ""),
+            "building_age_max": payload.get("building_age_max", ""),
             "net_m2_min": payload.get("net_m2_min", ""),
             "net_m2_max": payload.get("net_m2_max", ""),
             "gross_m2_min": payload.get("gross_m2_min", ""),
