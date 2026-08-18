@@ -1522,7 +1522,7 @@ th{font-size:12px;color:#6b7280}
 <body>
 <div class="container">
 <h1>HLF PAS</h1>
-<div class="subtitle">Piyasa Arama Sistemi <span class="small">v3.0-cache-first</span></div>
+<div class="subtitle">Piyasa Arama Sistemi <span class="small">v3.1</span></div>
 
 <div class="card">
 <div class="notice">
@@ -1947,7 +1947,97 @@ document.getElementById("historyButton").addEventListener("click",async ()=>{
  }finally{button.disabled=false;button.textContent=old;}
 });
 
-renderDistricts();
+
+// =========================================================
+// HLF PAS — son seçimleri ve filtreleri hatırla
+// localStorage kullanır; yeni deploy sonrası da korunur.
+// =========================================================
+const PAS_STATE_KEY = "hlf_pas_last_state_v1";
+
+function collectPasState(){
+  syncSelectedNeighborhoods();
+  const form = document.getElementById("pasForm");
+  const fd = new FormData(form);
+
+  return {
+    side: sideValue(),
+    districts: [...selectedDistricts],
+    neighborhoods: selectedNeighborhoods,
+    filters: {
+      rooms: fd.get("rooms") || "",
+      min_m2: fd.get("min_m2") || "",
+      max_m2: fd.get("max_m2") || "",
+      min_price: fd.get("min_price") || "",
+      max_price: fd.get("max_price") || "",
+      building_age_min: fd.get("building_age_min") || "",
+      building_age_max: fd.get("building_age_max") || "",
+      net_m2_min: fd.get("net_m2_min") || "",
+      net_m2_max: fd.get("net_m2_max") || "",
+      gross_m2_min: fd.get("gross_m2_min") || "",
+      gross_m2_max: fd.get("gross_m2_max") || ""
+    }
+  };
+}
+
+function savePasState(){
+  try{
+    localStorage.setItem(PAS_STATE_KEY, JSON.stringify(collectPasState()));
+  }catch(_e){}
+}
+
+function applySavedPasState(){
+  let saved = null;
+  try{
+    saved = JSON.parse(localStorage.getItem(PAS_STATE_KEY) || "null");
+  }catch(_e){
+    saved = null;
+  }
+  if(!saved || typeof saved !== "object") return;
+
+  const savedSide = saved.side || "all";
+  const sideEl = document.querySelector(`input[name="side"][value="${savedSide}"]`);
+  if(sideEl) sideEl.checked = true;
+
+  selectedDistricts = new Set(
+    Array.isArray(saved.districts)
+      ? saved.districts.filter(d => DISTRICTS.some(x => x.name === d))
+      : []
+  );
+
+  selectedNeighborhoods = {};
+  const rawNbs = saved.neighborhoods || {};
+  selectedDistricts.forEach(d=>{
+    const allowed = new Set(NEIGHBORHOODS[d] || []);
+    selectedNeighborhoods[d] = Array.isArray(rawNbs[d])
+      ? rawNbs[d].filter(n => allowed.has(n))
+      : [];
+  });
+
+  renderDistricts();
+
+  selectedDistricts.forEach(d=>{
+    syncCopies(d, true);
+    renderNeighborhoodBlock(d);
+  });
+
+  const filters = saved.filters || {};
+  Object.entries(filters).forEach(([name,value])=>{
+    const el = document.querySelector(`[name="${name}"]`);
+    if(el) el.value = value ?? "";
+  });
+
+  syncSelectedNeighborhoods();
+}
+
+document.getElementById("pasForm").addEventListener("change", savePasState);
+document.getElementById("pasForm").addEventListener("input", e=>{
+  if(e.target && (e.target.matches('input[type="number"]') || e.target.matches('select'))){
+    savePasState();
+  }
+});
+
+applySavedPasState();
+
 </script>
 </body>
 </html>
