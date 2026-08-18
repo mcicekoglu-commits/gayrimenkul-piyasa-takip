@@ -2,13 +2,11 @@ import os
 import re
 import json
 import math
-import random
 import statistics
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from dataclasses import dataclass, asdict
-from datetime import date, timedelta, datetime, timezone
 
 from flask import Flask, request, render_template_string, jsonify
 import psycopg
@@ -17,26 +15,27 @@ from psycopg.rows import dict_row
 app = Flask(__name__)
 
 # =========================================================
-# HLF PAS — Piyasa Arama Sistemi
-# Mimari:
-#   UI -> PostgreSQL cache -> analyze
-#   Açık kullanıcı onayıyla /api/sync -> Apify Search Scraper Pro -> PostgreSQL
-#   Normal filtreleme/aramanın Apify maliyeti yoktur.
+# HLF PAS v3.3 — Real Estate Actor'a geri dönüş
 #
 # Railway Variables:
-#   PAS_PROVIDER=demo
-#   PAS_PROVIDER=apify
-#   PAS_PROVIDER=authorized_sahibinden
+#   DATABASE_URL=...
+#   APIFY_API_TOKEN=...
+#   APIFY_TIMEOUT=300   (opsiyonel)
 #
-# Apify için:
-#   APIFY_API_TOKEN=...
-#   APIFY_API_TOKEN=...
-#   APIFY_TIMEOUT=300                              (opsiyonel)
-# Actor kod içinde sabit: clearpath~sahibinden-scraper-pro
-# DATABASE_URL Railway PostgreSQL bağlantısıdır.
-# PAS_SYNC_MAX_RESULTS artık kullanılmıyor; test limiti kodda sabit 1
-#   PAS_SYNC_ENRICHMENT artık kullanılmıyor; enrichment kodda sabit false
-#   Tek run maliyet tavanı kodda sabit 0.10 USD
+# Güvenlik:
+#   - Canlı test maxResults = 1
+#   - extractPhoneNumbers = false
+#   - API maxItems = 1
+#   - API maxTotalChargeUsd = 0.10
+#
+# Önemli:
+#   clearpath/sahibinden-real-estate Actor'ının güncel resmi input
+#   şemasında city ve district var, mahalle filtresi YOK.
+#   Bu yüzden canlı test ilçe bazında 1 ilan çeker ve seçilen mahalleyle
+#   eşleşirse kaydeder; eşleşmezse DB'ye yazmaz.
+#
+#   Geçmiş başarılı Real Estate run'ları ise ücretsiz olarak okunup
+#   seçilen mahalleye göre PostgreSQL'e aktarılabilir.
 # =========================================================
 
 DISTRICTS = [
@@ -138,28 +137,21 @@ NEIGHBORHOODS = {
     ],
 }
 
-DISTRICT_BASE_M2 = {
-    "Kadıköy": 145000,
-    "Beykoz": 118000,
-    "Üsküdar": 132000,
-    "Ataşehir": 111000,
-    "Maltepe": 91000,
-    "Kartal": 80000,
-    "Çekmeköy": 73000,
-    "Beşiktaş": 190000,
-    "Şişli": 142000,
-    "Bakırköy": 124000,
-    "Bahçelievler": 78000,
-}
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+APIFY_API_TOKEN = os.environ.get("APIFY_API_TOKEN", "").strip()
+APIFY_TIMEOUT = int(os.environ.get("APIFY_TIMEOUT", "300") or 300)
 
-ROOMS = ["1+1", "2+1", "3+1", "4+1", "5+1 ve üzeri"]
+# ÇALIŞAN ESKİ ACTOR
+ACTOR_ID = "clearpath~sahibinden-real-estate"
+
+# Şimdilik kesin test limiti
+SYNC_MAX_RESULTS = 1
+SYNC_MAX_CHARGE_USD = 0.10
 
 
 def parse_int(value):
-    """TL, m² ve benzeri sayısal alanları güvenli biçimde tam sayıya çevirir."""
     if value in (None, ""):
         return None
-
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
@@ -167,18 +159,12 @@ def parse_int(value):
     if isinstance(value, float):
         return int(value)
 
-    text = str(value).strip()
-    if not text:
-        return None
-
-    # Para birimi, m² gibi yazıları temizle.
-    text = re.sub(r"[^\d,.\-]", "", text)
+    text = re.sub(r"[^\d,.\-]", "", str(value).strip())
     if not text:
         return None
 
     try:
         if "," in text and "." in text:
-            # 22.000.000,00 veya 22,000,000.00
             if text.rfind(",") > text.rfind("."):
                 text = text.replace(".", "").replace(",", ".")
             else:
@@ -193,55 +179,22 @@ def parse_int(value):
             parts = text.split(".")
             if len(parts) > 1 and all(p.isdigit() for p in parts) and len(parts[-1]) == 3:
                 text = "".join(parts)
-
         return int(float(text))
-    except (TypeError, ValueError):
+    except Exception:
         return None
 
 
-def stable_seed(text):
-    total = 0
-    for i, ch in enumerate(str(text), start=1):
-        total += i * ord(ch)
-    return total % 10_000_000
-
-
-def normalize_place_name(value):
+def normalize_place(value):
     text = str(value or "").strip()
-    text = re.sub(
-        r"\s+(Mahallesi|Mah\.|Mh\.|Mah|Mh)$",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
+    text = re.sub(r"\s+(Mahallesi|Mah\.|Mh\.|Mah|Mh)$", "", text, flags=re.I)
     return text.strip()
 
 
-def sahibinden_slug(value):
-    text = normalize_place_name(value).casefold()
-    replacements = {
-        "ı": "i", "ğ": "g", "ü": "u",
-        "ş": "s", "ö": "o", "ç": "c",
-    }
-    for src, dst in replacements.items():
-        text = text.replace(src, dst)
+def slug(value):
+    text = normalize_place(value).casefold()
+    for a, b in {"ı":"i","ğ":"g","ü":"u","ş":"s","ö":"o","ç":"c"}.items():
+        text = text.replace(a, b)
     return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
-
-
-def sahibinden_search_url(district, neighborhood=None):
-    district_slug = sahibinden_slug(district)
-    if neighborhood:
-        neighborhood_slug = sahibinden_slug(neighborhood)
-        return (
-            "https://www.sahibinden.com/satilik-daire/"
-            f"istanbul-{district_slug}-{neighborhood_slug}-{neighborhood_slug}-mah."
-        )
-    return (
-        "https://www.sahibinden.com/satilik-daire/"
-        f"istanbul-{district_slug}"
-    )
-
-
 
 
 @dataclass
@@ -250,13 +203,13 @@ class Listing:
     district: str
     neighborhood: str
     title: str
-    price: int
-    gross_m2: int
-    net_m2: int
+    price: int | None
+    gross_m2: int | None
+    net_m2: int | None
     rooms: str
     listing_date: str
     building_age: int | None = None
-    source: str = "demo"
+    source: str = "sahibinden-real-estate"
 
     @property
     def gross_price_m2(self):
@@ -274,11 +227,8 @@ class Listing:
 
 
 # =========================================================
-# PostgreSQL — HLF PAS kalıcı ilan hafızası
+# PostgreSQL
 # =========================================================
-
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
-
 
 def db_configured():
     return bool(DATABASE_URL)
@@ -291,7 +241,6 @@ def db_connect():
 
 
 def init_db():
-    """Tablolar yoksa otomatik oluşturur."""
     if not db_configured():
         return
 
@@ -317,20 +266,6 @@ def init_db():
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """)
-            # Mevcut Railway/Postgres tablosu daha önce oluşturulduysa
-            # bina yaşı kolonunu güvenli biçimde ekle.
-            cur.execute("""
-                ALTER TABLE pas_listings
-                ADD COLUMN IF NOT EXISTS building_age INTEGER
-            """)
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_pas_listings_location
-                ON pas_listings (district, neighborhood)
-            """)
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_pas_listings_active
-                ON pas_listings (active)
-            """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS pas_sync_state (
                     scope_key TEXT PRIMARY KEY,
@@ -341,58 +276,14 @@ def init_db():
                     last_error TEXT NOT NULL DEFAULT ''
                 )
             """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_pas_listings_location
+                ON pas_listings (district, neighborhood)
+            """)
         conn.commit()
 
 
-def _listing_matches_filters(row, filters):
-    requested_rooms = str(filters.get("rooms") or "").strip()
-    min_m2 = parse_int(filters.get("min_m2"))
-    max_m2 = parse_int(filters.get("max_m2"))
-    min_price = parse_int(filters.get("min_price"))
-    max_price = parse_int(filters.get("max_price"))
-    net_m2_min = parse_int(filters.get("net_m2_min"))
-    net_m2_max = parse_int(filters.get("net_m2_max"))
-    gross_m2_min = parse_int(filters.get("gross_m2_min"))
-    gross_m2_max = parse_int(filters.get("gross_m2_max"))
-    building_age_min = parse_int(filters.get("building_age_min"))
-    building_age_max = parse_int(filters.get("building_age_max"))
-
-    if requested_rooms and row.rooms and row.rooms != requested_rooms:
-        return False
-    if min_m2 is not None and (row.gross_m2 is None or row.gross_m2 < min_m2):
-        return False
-    if max_m2 is not None and (row.gross_m2 is None or row.gross_m2 > max_m2):
-        return False
-    if min_price is not None and (row.price is None or row.price < min_price):
-        return False
-    if max_price is not None and (row.price is None or row.price > max_price):
-        return False
-
-    if net_m2_min is not None:
-        if not row.net_price_m2 or row.net_price_m2 < net_m2_min:
-            return False
-    if net_m2_max is not None:
-        if not row.net_price_m2 or row.net_price_m2 > net_m2_max:
-            return False
-    if gross_m2_min is not None:
-        if not row.gross_price_m2 or row.gross_price_m2 < gross_m2_min:
-            return False
-    if gross_m2_max is not None:
-        if not row.gross_price_m2 or row.gross_price_m2 > gross_m2_max:
-            return False
-
-    if building_age_min is not None:
-        if row.building_age is None or row.building_age < building_age_min:
-            return False
-    if building_age_max is not None:
-        if row.building_age is None or row.building_age > building_age_max:
-            return False
-
-    return True
-
-
 def save_listings_to_db(listings):
-    """İlan no üzerinden upsert. Aynı ilan tekrar ücretli arama nedeni olmaz."""
     if not listings:
         return {"saved": 0, "new": 0, "updated": 0}
 
@@ -405,41 +296,34 @@ def save_listings_to_db(listings):
             for item in listings:
                 url = getattr(item, "_listing_url", "") or ""
 
-                cur.execute(
-                    "SELECT id FROM pas_listings WHERE id = %s",
-                    (str(item.id),),
-                )
+                cur.execute("SELECT 1 FROM pas_listings WHERE id=%s", (str(item.id),))
                 exists = cur.fetchone() is not None
 
                 cur.execute("""
                     INSERT INTO pas_listings (
-                        id, district, neighborhood, title, price,
-                        gross_m2, net_m2, rooms, listing_date, building_age,
-                        source, url, active, first_seen, last_seen, updated_at
+                        id,district,neighborhood,title,price,gross_m2,net_m2,
+                        rooms,listing_date,building_age,source,url,active,
+                        first_seen,last_seen,updated_at
                     )
                     VALUES (
-                        %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s,
-                        %s, %s, TRUE, NOW(), NOW(), NOW()
+                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,
+                        NOW(),NOW(),NOW()
                     )
                     ON CONFLICT (id) DO UPDATE SET
-                        district = EXCLUDED.district,
-                        neighborhood = EXCLUDED.neighborhood,
-                        title = EXCLUDED.title,
-                        price = EXCLUDED.price,
-                        gross_m2 = EXCLUDED.gross_m2,
-                        net_m2 = EXCLUDED.net_m2,
-                        rooms = EXCLUDED.rooms,
-                        listing_date = EXCLUDED.listing_date,
-                        building_age = EXCLUDED.building_age,
-                        source = EXCLUDED.source,
-                        url = CASE
-                            WHEN EXCLUDED.url <> '' THEN EXCLUDED.url
-                            ELSE pas_listings.url
-                        END,
-                        active = TRUE,
-                        last_seen = NOW(),
-                        updated_at = NOW()
+                        district=EXCLUDED.district,
+                        neighborhood=EXCLUDED.neighborhood,
+                        title=EXCLUDED.title,
+                        price=EXCLUDED.price,
+                        gross_m2=COALESCE(EXCLUDED.gross_m2,pas_listings.gross_m2),
+                        net_m2=COALESCE(EXCLUDED.net_m2,pas_listings.net_m2),
+                        rooms=CASE WHEN EXCLUDED.rooms<>'' THEN EXCLUDED.rooms ELSE pas_listings.rooms END,
+                        listing_date=CASE WHEN EXCLUDED.listing_date<>'' THEN EXCLUDED.listing_date ELSE pas_listings.listing_date END,
+                        building_age=COALESCE(EXCLUDED.building_age,pas_listings.building_age),
+                        source=EXCLUDED.source,
+                        url=CASE WHEN EXCLUDED.url<>'' THEN EXCLUDED.url ELSE pas_listings.url END,
+                        active=TRUE,
+                        last_seen=NOW(),
+                        updated_at=NOW()
                 """, (
                     str(item.id),
                     item.district,
@@ -462,19 +346,81 @@ def save_listings_to_db(listings):
 
         conn.commit()
 
-    return {
-        "saved": len(listings),
-        "new": new_count,
-        "updated": updated_count,
-    }
+    return {"saved": len(listings), "new": new_count, "updated": updated_count}
+
+
+def record_sync_state(district, neighborhood, result_count=0, error=""):
+    if not db_configured():
+        return
+
+    init_db()
+    key = f"{slug(district)}::{slug(neighborhood)}"
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO pas_sync_state (
+                    scope_key,district,neighborhood,last_sync,last_result_count,last_error
+                )
+                VALUES (%s,%s,%s,NOW(),%s,%s)
+                ON CONFLICT (scope_key) DO UPDATE SET
+                    district=EXCLUDED.district,
+                    neighborhood=EXCLUDED.neighborhood,
+                    last_sync=NOW(),
+                    last_result_count=EXCLUDED.last_result_count,
+                    last_error=EXCLUDED.last_error
+            """, (key, district, neighborhood, result_count, error or ""))
+        conn.commit()
+
+
+def listing_matches_filters(row, filters):
+    room = str(filters.get("rooms") or "").strip()
+    if room and row.rooms != room:
+        return False
+
+    comparisons = (
+        ("gross_m2", "min_m2", ">="),
+        ("gross_m2", "max_m2", "<="),
+        ("price", "min_price", ">="),
+        ("price", "max_price", "<="),
+        ("building_age", "building_age_min", ">="),
+        ("building_age", "building_age_max", "<="),
+    )
+
+    for field, key, op in comparisons:
+        wanted = parse_int(filters.get(key))
+        if wanted is None:
+            continue
+        actual = getattr(row, field)
+        if actual is None:
+            return False
+        if op == ">=" and actual < wanted:
+            return False
+        if op == "<=" and actual > wanted:
+            return False
+
+    for prop, lo_key, hi_key in (
+        ("gross_price_m2", "gross_m2_min", "gross_m2_max"),
+        ("net_price_m2", "net_m2_min", "net_m2_max"),
+    ):
+        actual = getattr(row, prop)
+        lo = parse_int(filters.get(lo_key))
+        hi = parse_int(filters.get(hi_key))
+        if lo is not None and (actual is None or actual < lo):
+            return False
+        if hi is not None and (actual is None or actual > hi):
+            return False
+
+    return True
 
 
 def load_listings_from_db(filters):
-    """Ana PAS araması: sadece PostgreSQL. Apify çağrısı YOK."""
-    init_db()
+    if not db_configured():
+        return []
 
+    init_db()
     districts = filters.get("districts") or []
-    selected_neighborhoods = filters.get("neighborhoods") or {}
+    selected_nbs = filters.get("neighborhoods") or {}
 
     if not districts:
         return []
@@ -482,382 +428,106 @@ def load_listings_from_db(filters):
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT
-                    id, district, neighborhood, title, price,
-                    gross_m2, net_m2, rooms, listing_date, building_age, source, url
+                SELECT id,district,neighborhood,title,price,gross_m2,net_m2,
+                       rooms,listing_date,building_age,source,url
                 FROM pas_listings
-                WHERE active = TRUE
-                  AND district = ANY(%s)
-                ORDER BY listing_date DESC NULLS LAST, updated_at DESC
+                WHERE active=TRUE AND district=ANY(%s)
+                ORDER BY updated_at DESC
             """, (districts,))
             rows = cur.fetchall()
 
-    requested_pairs = set()
-    for district in districts:
-        for neighborhood in selected_neighborhoods.get(district) or []:
-            requested_pairs.add(
-                (
-                    sahibinden_slug(district),
-                    sahibinden_slug(neighborhood),
-                )
-            )
+    requested_pairs = {
+        (slug(d), slug(n))
+        for d in districts
+        for n in (selected_nbs.get(d) or [])
+    }
 
-    listings = []
-    for row in rows:
+    out = []
+    for r in rows:
         if requested_pairs:
-            pair = (
-                sahibinden_slug(row["district"]),
-                sahibinden_slug(row["neighborhood"]),
-            )
-            if pair not in requested_pairs:
+            if (slug(r["district"]), slug(r["neighborhood"])) not in requested_pairs:
                 continue
 
         item = Listing(
-            id=str(row["id"]),
-            district=row["district"] or "",
-            neighborhood=row["neighborhood"] or "",
-            title=row["title"] or "İlan",
-            price=parse_int(row["price"]),
-            gross_m2=parse_int(row["gross_m2"]),
-            net_m2=parse_int(row["net_m2"]),
-            rooms=row["rooms"] or "",
-            listing_date=row["listing_date"] or "",
-            building_age=parse_int(row["building_age"]),
-            source=row["source"] or "cache",
+            id=str(r["id"]),
+            district=r["district"] or "",
+            neighborhood=r["neighborhood"] or "",
+            title=r["title"] or "İlan",
+            price=parse_int(r["price"]),
+            gross_m2=parse_int(r["gross_m2"]),
+            net_m2=parse_int(r["net_m2"]),
+            rooms=r["rooms"] or "",
+            listing_date=r["listing_date"] or "",
+            building_age=parse_int(r["building_age"]),
+            source=r["source"] or "cache",
         )
-        item._listing_url = row["url"] or ""
+        item._listing_url = r["url"] or ""
 
-        if _listing_matches_filters(item, filters):
-            listings.append(item)
+        if listing_matches_filters(item, filters):
+            out.append(item)
 
-    return listings
-
-
-def sync_scope_key(district, neighborhood):
-    return f"{sahibinden_slug(district)}::{sahibinden_slug(neighborhood)}"
+    return out
 
 
-def record_sync_state(district, neighborhood, result_count=0, error=""):
-    init_db()
-    key = sync_scope_key(district, neighborhood)
+# =========================================================
+# Apify — Real Estate Actor
+# =========================================================
 
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO pas_sync_state (
-                    scope_key, district, neighborhood,
-                    last_sync, last_result_count, last_error
-                )
-                VALUES (%s, %s, %s, NOW(), %s, %s)
-                ON CONFLICT (scope_key) DO UPDATE SET
-                    district = EXCLUDED.district,
-                    neighborhood = EXCLUDED.neighborhood,
-                    last_sync = NOW(),
-                    last_result_count = EXCLUDED.last_result_count,
-                    last_error = EXCLUDED.last_error
-            """, (key, district, neighborhood, result_count, error or ""))
-        conn.commit()
-
-
-def get_sync_state(district, neighborhood):
-    if not db_configured():
-        return None
-
-    init_db()
-    key = sync_scope_key(district, neighborhood)
-
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT last_sync, last_result_count, last_error
-                FROM pas_sync_state
-                WHERE scope_key = %s
-            """, (key,))
-            row = cur.fetchone()
-
-    if not row:
-        return None
-
-    last_sync = row["last_sync"]
-    return {
-        "last_sync": last_sync.isoformat() if last_sync else None,
-        "last_result_count": row["last_result_count"],
-        "last_error": row["last_error"],
-    }
-
-
-class DatabaseListingProvider:
-    name = "postgresql"
-
-    def configured(self):
-        return db_configured()
-
-    def search(self, filters):
-        if not self.configured():
-            raise RuntimeError("DATABASE_URL tanımlı değil.")
-        return load_listings_from_db(filters)
-
-
-class ListingProvider:
-    """Veri kaynağı entegrasyonları için ortak arayüz."""
-
-    name = "base"
-
-    def search(self, filters):
-        raise NotImplementedError
-
-
-class DemoListingProvider(ListingProvider):
-    """Gerçek veri çekmeden geliştirme/test için deterministik örnek ilan üretir."""
-
-    name = "demo"
-
-    def search(self, filters):
-        districts = filters.get("districts") or []
-        selected_neighborhoods = filters.get("neighborhoods") or {}
-        requested_rooms = filters.get("rooms") or ""
-
-        min_m2 = parse_int(filters.get("min_m2"))
-        max_m2 = parse_int(filters.get("max_m2"))
-        min_price = parse_int(filters.get("min_price"))
-        max_price = parse_int(filters.get("max_price"))
-        net_m2_min = parse_int(filters.get("net_m2_min"))
-        net_m2_max = parse_int(filters.get("net_m2_max"))
-        gross_m2_min = parse_int(filters.get("gross_m2_min"))
-        gross_m2_max = parse_int(filters.get("gross_m2_max"))
-        building_age_min = parse_int(filters.get("building_age_min"))
-        building_age_max = parse_int(filters.get("building_age_max"))
-
-        rows = []
-
-        for district in districts:
-            nbs = selected_neighborhoods.get(district) or NEIGHBORHOODS.get(district, [])[:5]
-            base_m2 = DISTRICT_BASE_M2.get(district, 90000)
-
-            for neighborhood in nbs:
-                seed = stable_seed(f"{district}|{neighborhood}")
-                rng = random.Random(seed)
-
-                for i in range(8):
-                    gross = rng.randint(55, 220)
-                    net = max(40, round(gross * rng.uniform(0.78, 0.92)))
-                    rooms = rng.choice(ROOMS)
-
-                    neighborhood_factor = 0.88 + (stable_seed(neighborhood) % 30) / 100
-                    listing_factor = rng.uniform(0.88, 1.18)
-                    price_m2 = int(base_m2 * neighborhood_factor * listing_factor)
-                    price = int(round((price_m2 * gross) / 50000) * 50000)
-
-                    listed = date.today() - timedelta(days=rng.randint(0, 45))
-                    building_age = rng.randint(0, 35)
-
-                    row = Listing(
-                        id=f"DEMO-{stable_seed(district + neighborhood + str(i))}",
-                        district=district,
-                        neighborhood=neighborhood,
-                        title=f"{neighborhood} {rooms} {gross} m² daire",
-                        price=price,
-                        gross_m2=gross,
-                        net_m2=net,
-                        rooms=rooms,
-                        listing_date=listed.isoformat(),
-                        building_age=building_age,
-                    )
-
-                    if requested_rooms and requested_rooms != row.rooms:
-                        continue
-                    if min_m2 is not None and row.gross_m2 < min_m2:
-                        continue
-                    if max_m2 is not None and row.gross_m2 > max_m2:
-                        continue
-                    if min_price is not None and row.price < min_price:
-                        continue
-                    if max_price is not None and row.price > max_price:
-                        continue
-                    if net_m2_min is not None and row.net_price_m2 < net_m2_min:
-                        continue
-                    if net_m2_max is not None and row.net_price_m2 > net_m2_max:
-                        continue
-                    if gross_m2_min is not None and row.gross_price_m2 < gross_m2_min:
-                        continue
-                    if gross_m2_max is not None and row.gross_price_m2 > gross_m2_max:
-                        continue
-                    if building_age_min is not None and row.building_age < building_age_min:
-                        continue
-                    if building_age_max is not None and row.building_age > building_age_max:
-                        continue
-
-                    rows.append(row)
-
-        return rows
-
-
-class AuthorizedSahibindenProvider(ListingProvider):
-    """Yetkili Sahibinden API bağlantısı için iskelet."""
-
-    name = "authorized_sahibinden"
-
+class RealEstateApifyProvider:
     def __init__(self):
-        self.base_url = os.environ.get("SAHIBINDEN_API_BASE_URL", "").strip().rstrip("/")
-        self.api_key = os.environ.get("SAHIBINDEN_API_KEY", "").strip()
-        self.auth_scheme = os.environ.get("SAHIBINDEN_API_AUTH_SCHEME", "Bearer").strip()
-        self.search_path = os.environ.get("SAHIBINDEN_API_SEARCH_PATH", "").strip()
-        self.timeout = parse_int(os.environ.get("SAHIBINDEN_API_TIMEOUT", "15")) or 15
-
-    def configured(self):
-        return bool(self.base_url and self.api_key and self.search_path)
-
-    def _headers(self):
-        return {
-            "Accept": "application/json",
-            "Authorization": f"{self.auth_scheme} {self.api_key}".strip(),
-            "User-Agent": "PAS/1.0",
-        }
-
-    def _request_json(self, url):
-        req = Request(url, headers=self._headers(), method="GET")
-        try:
-            with urlopen(req, timeout=self.timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            raise RuntimeError(f"Sahibinden API HTTP hatası: {exc.code}") from exc
-        except URLError as exc:
-            raise RuntimeError("Sahibinden API bağlantısı kurulamadı.") from exc
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("Sahibinden API geçersiz JSON döndürdü.") from exc
-
-    def _build_query(self, filters):
-        from urllib.parse import urlencode
-
-        params = {}
-        districts = filters.get("districts") or []
-        neighborhoods = filters.get("neighborhoods") or {}
-
-        if districts:
-            params["districts"] = ",".join(districts)
-
-        flat_neighborhoods = []
-        for district in districts:
-            for nb in neighborhoods.get(district) or []:
-                flat_neighborhoods.append(f"{district}:{nb}")
-
-        if flat_neighborhoods:
-            params["neighborhoods"] = "|".join(flat_neighborhoods)
-
-        for key in [
-            "rooms", "min_m2", "max_m2", "min_price", "max_price",
-            "net_m2_min", "net_m2_max", "gross_m2_min", "gross_m2_max",
-        ]:
-            value = filters.get(key)
-            if value not in (None, ""):
-                params[key] = value
-
-        return urlencode(params)
-
-    def _normalize_item(self, item):
-        def first(*keys, default=None):
-            for key in keys:
-                if key in item and item.get(key) not in (None, ""):
-                    return item.get(key)
-            return default
-
-        district = str(first("district", "districtName", "ilce", default="")).strip()
-        neighborhood = str(first("neighborhood", "neighborhoodName", "mahalle", default="")).strip()
-        title = str(first("title", "listingTitle", "baslik", default="İlan")).strip()
-        price = parse_int(first("price", "salePrice", "fiyat"))
-        gross_m2 = parse_int(first("grossM2", "gross_m2", "brutM2", "areaGross"))
-        net_m2 = parse_int(first("netM2", "net_m2", "netM2Value", "areaNet"))
-        rooms = str(first("rooms", "roomCount", "oda", default="")).strip()
-        listing_date = str(
-            first("listingDate", "date", "createdAt", "ilanTarihi", default=date.today().isoformat())
-        )[:10]
-        listing_id = str(first("id", "listingId", "ilanNo", default=stable_seed(title + district)))
-
-        if not district or not neighborhood or not price or not gross_m2 or not net_m2:
-            return None
-
-        return Listing(
-            id=listing_id,
-            district=district,
-            neighborhood=neighborhood,
-            title=title,
-            price=price,
-            gross_m2=gross_m2,
-            net_m2=net_m2,
-            rooms=rooms,
-            listing_date=listing_date,
-            source=self.name,
-        )
-
-    def search(self, filters):
-        if not self.configured():
-            raise RuntimeError("Yetkili Sahibinden API yapılandırması eksik.")
-
-        url = f"{self.base_url}/{self.search_path.lstrip('/')}"
-        query = self._build_query(filters)
-        if query:
-            url += "?" + query
-
-        payload = self._request_json(url)
-        raw_items = (
-            payload.get("data")
-            or payload.get("items")
-            or payload.get("listings")
-            or payload.get("results")
-            or []
-        )
-
-        listings = []
-        for item in raw_items:
-            if isinstance(item, dict):
-                normalized = self._normalize_item(item)
-                if normalized:
-                    listings.append(normalized)
-
-        return listings
-
-
-class ApifyListingProvider(ListingProvider):
-    """
-    HLF PAS güvenli canlı güncelleme sağlayıcısı.
-
-    TEST MODU:
-      - Actor input maxResults = 1
-      - enrichment = False
-      - Apify API maxItems = 1
-      - maxTotalChargeUsd = 0.10 USD
-
-    Normal PAS araması Apify kullanmaz.
-    Yanlış il / ilçe / mahalle dönen sonuçlar PostgreSQL'e yazılmaz.
-    """
-
-    name = "apify_sync"
-    ACTOR_ID = "clearpath~sahibinden-scraper-pro"
-
-    def __init__(self):
-        self.api_token = os.environ.get("APIFY_API_TOKEN", "").strip()
-        self.actor_id = self.ACTOR_ID
-        self.max_results = 1
-        self.enrichment = False
-        self.timeout = parse_int(os.environ.get("APIFY_TIMEOUT", "300")) or 300
-        self.timeout = max(30, min(self.timeout, 300))
-        self.max_charge_usd = 0.10
+        self.api_token = APIFY_API_TOKEN
+        self.actor_id = ACTOR_ID
+        self.timeout = max(30, min(APIFY_TIMEOUT, 300))
 
     def configured(self):
         return bool(self.api_token)
 
-    def _run_actor(self, actor_input):
+    def _request_json(self, req):
+        try:
+            with urlopen(req, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="ignore")[:1200]
+            except Exception:
+                pass
+            raise RuntimeError(f"Apify HTTP {exc.code}: {detail}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Apify bağlantı hatası: {exc.reason}") from exc
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Apify geçerli JSON döndürmedi.") from exc
+
+    def run_one(self, district):
+        if not self.configured():
+            raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
+
+        # Eski başarılı run'daki yapılandırılmış input'a geri dönüş.
+        actor_input = {
+            "listingType": "Sale",
+            "propertyCategory": "Residential",
+            "propertyType": ["Apartment"],
+            "city": "Istanbul",
+            "district": [district],
+            "sortBy": "Newest",
+            "extractPhoneNumbers": False,
+            "maxResults": 1,
+            "currency": "TRY",
+        }
+
         params = {
             "clean": "true",
             "format": "json",
             "limit": "1",
             "maxItems": "1",
-            "maxTotalChargeUsd": f"{self.max_charge_usd:.2f}",
+            "maxTotalChargeUsd": f"{SYNC_MAX_CHARGE_USD:.2f}",
             "timeout": str(self.timeout),
         }
+
         url = (
             f"https://api.apify.com/v2/acts/{self.actor_id}"
-            "/run-sync-get-dataset-items?" + urlencode(params)
+            "/run-sync-get-dataset-items?"
+            + urlencode(params)
         )
 
         req = Request(
@@ -867,243 +537,154 @@ class ApifyListingProvider(ListingProvider):
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self.api_token}",
-                "User-Agent": "HLF-PAS/3.2-safe1",
+                "User-Agent": "HLF-PAS/3.3",
             },
             method="POST",
         )
 
-        try:
-            with urlopen(req, timeout=self.timeout) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            try:
-                detail = exc.read().decode("utf-8", errors="ignore")[:1200]
-            except Exception:
-                detail = ""
-            raise RuntimeError(f"Apify HTTP hatası: {exc.code}. {detail}") from exc
-        except URLError as exc:
-            raise RuntimeError(f"Apify bağlantı hatası: {exc.reason}") from exc
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("Apify geçerli JSON döndürmedi.") from exc
+        payload = self._request_json(req)
 
         if isinstance(payload, list):
-            return payload[:1]
+            return payload, actor_input
         if isinstance(payload, dict):
-            rows = payload.get("items") or payload.get("data") or payload.get("results") or []
-            return rows[:1] if isinstance(rows, list) else []
-        return []
+            return (
+                payload.get("items")
+                or payload.get("data")
+                or payload.get("results")
+                or []
+            ), actor_input
+        return [], actor_input
 
-    @staticmethod
-    def _pick(mapping, *keys):
-        if not isinstance(mapping, dict):
-            return None
-        for key in keys:
-            value = mapping.get(key)
-            if value not in (None, ""):
-                return value
-        return None
-
-    @staticmethod
-    def _coded_attribute(item, code):
-        """Search Scraper Pro searchSummary içindeki aXX kodlu alanı okur."""
-        for bucket_name in ("searchAttributes", "attributes"):
-            bucket = item.get(bucket_name)
-            if isinstance(bucket, dict) and bucket.get(code) not in (None, ""):
-                return bucket.get(code)
-        raw = item.get("rawSummary")
-        if isinstance(raw, dict):
-            for bucket_name in ("searchAttributes", "attributes"):
-                bucket = raw.get(bucket_name)
-                if isinstance(bucket, dict) and bucket.get(code) not in (None, ""):
-                    return bucket.get(code)
-        return None
-
-    def _normalize_item(self, item, fallback_district=None, fallback_neighborhood=None):
+    def normalize_item(self, item):
         if not isinstance(item, dict):
             return None
 
-        raw = item.get("rawSummary") if isinstance(item.get("rawSummary"), dict) else {}
-
         listing_id = str(
-            self._pick(item, "id", "listingId", "adId", "classifiedId")
-            or self._pick(raw, "id", "listingId", "adId", "classifiedId")
+            item.get("id")
+            or item.get("listingId")
             or ""
         ).strip()
 
-        listing_url = str(
-            self._pick(item, "url", "listingUrl", "href")
-            or self._pick(raw, "url", "listingUrl", "href")
+        url = str(
+            item.get("url")
+            or item.get("listingUrl")
             or ""
         ).strip()
-        if listing_url.startswith("/"):
-            listing_url = "https://www.sahibinden.com" + listing_url
-        if not listing_id and listing_url:
-            match = re.search(r"(\d{8,})", listing_url)
-            if match:
-                listing_id = match.group(1)
 
-        price = parse_int(
-            self._pick(item, "price", "formattedPrice", "salePrice", "amount")
-            or self._pick(raw, "price", "formattedPrice", "salePrice", "amount")
-        )
-        if not listing_id or not price:
+        if not listing_id and url:
+            m = re.search(r"(\d{8,})", url)
+            if m:
+                listing_id = m.group(1)
+
+        price = parse_int(item.get("price") or item.get("formattedPrice"))
+
+        if not listing_id or price is None:
             return None
 
-        title = str(
-            self._pick(item, "title", "listingTitle", "adTitle")
-            or self._pick(raw, "title", "listingTitle", "adTitle")
-            or "İlan"
-        ).strip()
+        city = normalize_place(item.get("city"))
+        district = normalize_place(item.get("district"))
 
-        # Gerçek 18:05 run çıktısında konum alanları top-level geldi:
-        # city / district / neighborhood / quarter / address.
-        city = normalize_place_name(
-            self._pick(item, "city", "cityName")
-            or self._pick(raw, "city", "cityName")
-            or ""
-        )
-        district = normalize_place_name(
-            self._pick(item, "district", "districtName", "town")
-            or self._pick(raw, "district", "districtName", "town")
-            or ""
-        )
-        quarter = normalize_place_name(
-            self._pick(item, "quarter", "quarterName")
-            or self._pick(raw, "quarter", "quarterName")
-            or ""
-        )
-        actor_neighborhood = normalize_place_name(
-            self._pick(item, "neighborhood", "neighborhoodName")
-            or self._pick(raw, "neighborhood", "neighborhoodName")
-            or ""
-        )
+        # Actor output örneğinde neighborhood çoğu zaman boş,
+        # gerçek mahalle quarter alanında geliyor.
+        quarter = normalize_place(item.get("quarter"))
+        neighborhood = normalize_place(item.get("neighborhood"))
+        effective_neighborhood = quarter or neighborhood
 
-        # Sahibinden search-summary'de gerçek mahalle "quarter" alanında.
-        neighborhood = quarter or actor_neighborhood
+        rooms = str(item.get("rooms") or "").strip()
+        gross_m2 = parse_int(item.get("grossSize"))
+        net_m2 = parse_int(item.get("netSize"))
+        building_age = parse_int(item.get("buildingAge"))
 
-        # 18:26'da görülen gerçek searchSummary kodları:
-        # a24 = brüt m², a107889 = net m², a20 = oda sayısı,
-        # a812 = bina yaşı (örn. "0 (Yapım Aşamasında)").
-        gross_m2 = parse_int(
-            self._pick(item, "grossSize", "grossM2", "gross_m2", "areaGross")
-            or self._coded_attribute(item, "a24")
-        )
-        net_m2 = parse_int(
-            self._pick(item, "netSize", "netM2", "net_m2", "areaNet")
-            or self._coded_attribute(item, "a107889")
-        )
-        if gross_m2 and net_m2 and net_m2 > gross_m2:
-            net_m2 = None
-
-        rooms = str(
-            self._pick(item, "rooms", "roomCount", "room")
-            or self._coded_attribute(item, "a20")
-            or ""
-        ).strip()
-
-        building_age = parse_int(
-            self._pick(item, "buildingAge", "building_age")
-            or self._coded_attribute(item, "a812")
-        )
-
-        listed_at = str(
-            self._pick(item, "listingDate", "listedAt", "createdAt", "date")
-            or self._pick(raw, "listingDate", "listedAt", "createdAt", "date")
-            or ""
-        ).strip()
+        listed_at = str(item.get("listedAt") or item.get("listingDate") or "").strip()
         listing_date = listed_at[:10] if listed_at else ""
 
         listing = Listing(
             id=listing_id,
             district=district,
-            neighborhood=neighborhood,
-            title=title,
+            neighborhood=effective_neighborhood,
+            title=str(item.get("title") or "İlan").strip(),
             price=price,
             gross_m2=gross_m2,
             net_m2=net_m2,
             rooms=rooms,
             listing_date=listing_date,
             building_age=building_age,
-            source="sahibinden-scraper-pro",
+            source="sahibinden-real-estate",
         )
-        listing._listing_url = listing_url
+
+        listing._listing_url = url
         listing._city = city
-        listing._actor_neighborhood = actor_neighborhood
         listing._quarter = quarter
-        listing._address = str(self._pick(item, "address") or "")
-        listing._source_url = str(self._pick(item, "sourceUrl") or "")
-        listing._record_type = str(self._pick(item, "recordType") or "")
+        listing._raw_neighborhood = neighborhood
+        listing._address = str(item.get("address") or "")
+
         return listing
 
-    @staticmethod
-    def _location_is_target(listing, district, neighborhood):
-        return (
-            sahibinden_slug(getattr(listing, "_city", "")) == "istanbul"
-            and sahibinden_slug(listing.district) == sahibinden_slug(district)
-            and sahibinden_slug(listing.neighborhood) == sahibinden_slug(neighborhood)
-        )
+    def is_target(self, item, district, neighborhood):
+        if slug(getattr(item, "_city", "")) != "istanbul":
+            return False
 
-    @staticmethod
-    def _location_text(listing):
-        parts = [
-            getattr(listing, "_city", ""),
-            listing.district,
-            getattr(listing, "_quarter", "") or listing.neighborhood,
-        ]
-        return " / ".join(str(x) for x in parts if x) or "konum okunamadı"
+        if slug(item.district) != slug(district):
+            return False
 
-    def sync_neighborhood(self, district, neighborhood):
-        if not self.configured():
-            raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
+        candidate_names = {
+            slug(item.neighborhood),
+            slug(getattr(item, "_quarter", "")),
+            slug(getattr(item, "_raw_neighborhood", "")),
+        }
+        candidate_names.discard("")
 
-        start_url = sahibinden_search_url(district, neighborhood)
-        print(f"HLF PAS Apify TEST URL: {start_url}", flush=True)
+        return slug(neighborhood) in candidate_names
 
-        actor_input = {
-            "startUrls": [start_url],
-            "enrichment": False,
-            "maxResults": 1,
+    def sync_neighborhood_one_result(self, district, neighborhood):
+        raw_items, actor_input = self.run_one(district)
+
+        accepted = []
+        rejected = []
+
+        for raw in raw_items:
+            item = self.normalize_item(raw)
+            if not item:
+                rejected.append({"reason": "parse"})
+                continue
+
+            if self.is_target(item, district, neighborhood):
+                accepted.append(item)
+            else:
+                rejected.append({
+                    "reason": "wrong_neighborhood",
+                    "id": item.id,
+                    "city": getattr(item, "_city", ""),
+                    "district": item.district,
+                    "quarter": getattr(item, "_quarter", ""),
+                    "neighborhood": getattr(item, "_raw_neighborhood", ""),
+                    "address": getattr(item, "_address", ""),
+                })
+
+        return {
+            "raw_count": len(raw_items),
+            "accepted": accepted,
+            "rejected": rejected,
+            "actor_input": actor_input,
         }
 
-        raw_items = self._run_actor(actor_input)
-        print(f"HLF PAS Apify raw result count: {len(raw_items)}", flush=True)
-
-        if not raw_items:
-            return []
-
-        normalized = self._normalize_item(raw_items[0], district, neighborhood)
-        if not normalized:
-            raise RuntimeError(
-                "Apify 1 ham sonuç üretti fakat ilan kimliği/fiyatı okunamadı. "
-                "Kayıt yapılmadı. Aynı testi tekrar çalıştırmayın."
-            )
-
-        if not self._location_is_target(normalized, district, neighborhood):
-            raise RuntimeError(
-                "Apify 1 sonuç üretti fakat YANLIŞ KONUM döndürdü. "
-                f"Hedef: İstanbul / {district} / {neighborhood}. "
-                f"Dönen: {self._location_text(normalized)}. "
-                "Bu ilan PostgreSQL'e KAYDEDİLMEDİ. "
-                "Bu durumda aynı butona tekrar basmayın; sorun Actor tarafındaki arama sonucudur."
-            )
-
-        return [normalized]
-
-    def _get_json(self, url):
+    def get_json(self, url):
         req = Request(
             url,
             headers={
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self.api_token}",
-                "User-Agent": "HLF-PAS/3.2-safe1",
+                "User-Agent": "HLF-PAS/3.3",
             },
             method="GET",
         )
-        with urlopen(req, timeout=self.timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+        return self._request_json(req)
 
-    def import_paid_history(self, district, neighborhood, max_items=100):
-        """Mevcut başarılı datasetleri okur; yeni Actor run BAŞLATMAZ."""
+    def import_old_real_estate_history(self, district, neighborhood, max_items=250):
+        """
+        Yeni Actor run başlatmaz.
+        Sadece clearpath/sahibinden-real-estate geçmiş başarılı run datasetlerini okur.
+        """
         if not self.configured():
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
@@ -1111,83 +692,74 @@ class ApifyListingProvider(ListingProvider):
             f"https://api.apify.com/v2/acts/{self.actor_id}/runs?"
             + urlencode({"desc": "true", "limit": "100"})
         )
-        payload = self._get_json(runs_url)
-        runs = ((payload.get("data") or {}).get("items") or []) if isinstance(payload, dict) else []
 
-        found = []
+        payload = self.get_json(runs_url)
+        runs = (
+            ((payload.get("data") or {}).get("items") or [])
+            if isinstance(payload, dict)
+            else []
+        )
+
+        accepted = []
         seen = set()
+        inspected = 0
 
         for run in runs:
-            if len(found) >= max_items:
+            if len(accepted) >= max_items:
                 break
-            if not isinstance(run, dict) or str(run.get("status") or "").upper() != "SUCCEEDED":
+
+            if str(run.get("status") or "").upper() != "SUCCEEDED":
                 continue
+
             dataset_id = run.get("defaultDatasetId")
             if not dataset_id:
                 continue
 
             items_url = (
                 f"https://api.apify.com/v2/datasets/{dataset_id}/items?"
-                + urlencode({"clean": "true", "limit": "200"})
+                + urlencode({"clean": "true", "limit": "1000"})
             )
+
             try:
-                items = self._get_json(items_url)
+                items = self.get_json(items_url)
             except Exception:
                 continue
+
             if not isinstance(items, list):
                 continue
 
-            for raw_item in items:
-                if len(found) >= max_items:
+            for raw in items:
+                if len(accepted) >= max_items:
                     break
-                normalized = self._normalize_item(raw_item, district, neighborhood)
-                if not normalized:
+
+                inspected += 1
+                item = self.normalize_item(raw)
+                if not item:
                     continue
-                if not self._location_is_target(normalized, district, neighborhood):
+
+                if not self.is_target(item, district, neighborhood):
                     continue
-                if str(normalized.id) in seen:
+
+                if item.id in seen:
                     continue
-                seen.add(str(normalized.id))
-                found.append(normalized)
 
-        return found
+                seen.add(item.id)
+                accepted.append(item)
 
-    def search(self, filters):
-        raise RuntimeError(
-            "Apify normal aramada kullanılmıyor. Yeni ilanlar için /api/sync kullanın."
-        )
-
-def build_provider():
-    # HLF PAS v2: normal arama her zaman PostgreSQL kayıtlarından yapılır.
-    if db_configured():
-        return DatabaseListingProvider()
-
-    # DATABASE_URL yoksa sistem bozulmasın diye demo fallback.
-    return DemoListingProvider()
+        return accepted, inspected
 
 
-PROVIDER = build_provider()
-APIFY_SYNC_PROVIDER = ApifyListingProvider()
+APIFY = RealEstateApifyProvider()
 
 try:
     init_db()
-except Exception as _db_init_exc:
-    print(f"HLF PAS DB init warning: {_db_init_exc}")
+except Exception as exc:
+    print("HLF PAS DB init warning:", exc, flush=True)
 
 
-def percentile(values, p):
-    if not values:
-        return None
-    vals = sorted(values)
-    if len(vals) == 1:
-        return vals[0]
-    k = (len(vals) - 1) * p
-    f = math.floor(k)
-    c = math.ceil(k)
-    if f == c:
-        return vals[int(k)]
-    return round(vals[f] * (c - k) + vals[c] * (k - f))
-
+# =========================================================
+# Analiz
+# =========================================================
 
 def analyze(listings):
     if not listings:
@@ -1196,101 +768,64 @@ def analyze(listings):
             "median_price": None,
             "avg_price": None,
             "median_gross_m2_price": None,
-            "avg_gross_m2_price": None,
             "median_net_m2_price": None,
-            "avg_net_m2_price": None,
             "avg_building_age": None,
-            "q1_gross_m2_price": None,
-            "q3_gross_m2_price": None,
             "by_neighborhood": [],
         }
 
     prices = [x.price for x in listings if x.price]
-    m2s = [x.gross_price_m2 for x in listings if x.gross_price_m2]
-    net_m2s = [x.net_price_m2 for x in listings if x.net_price_m2]
-    building_ages = [
-        x.building_age for x in listings
-        if x.building_age is not None
-    ]
+    gross = [x.gross_price_m2 for x in listings if x.gross_price_m2]
+    net = [x.net_price_m2 for x in listings if x.net_price_m2]
+    ages = [x.building_age for x in listings if x.building_age is not None]
 
     grouped = {}
     for x in listings:
-        key = f"{x.district} · {x.neighborhood}"
-        grouped.setdefault(key, []).append(x)
+        grouped.setdefault(f"{x.district} · {x.neighborhood}", []).append(x)
 
     by_neighborhood = []
-    for key, rows in grouped.items():
-        row_prices = [x.price for x in rows if x.price]
-        row_m2s = [x.gross_price_m2 for x in rows if x.gross_price_m2]
-        row_building_ages = [
-            x.building_age for x in rows
-            if x.building_age is not None
-        ]
-        if not row_prices or not row_m2s:
-            continue
-        by_neighborhood.append({
-            "name": key,
-            "count": len(rows),
-            "median_price": round(statistics.median(row_prices)),
-            "median_gross_m2_price": round(statistics.median(row_m2s)),
-            "avg_building_age": (
-                round(statistics.mean(row_building_ages), 1)
-                if row_building_ages else None
-            ),
-        })
+    for name, rows in grouped.items():
+        ps = [x.price for x in rows if x.price]
+        gs = [x.gross_price_m2 for x in rows if x.gross_price_m2]
+        aa = [x.building_age for x in rows if x.building_age is not None]
 
-    by_neighborhood.sort(key=lambda x: x["median_gross_m2_price"], reverse=True)
+        by_neighborhood.append({
+            "name": name,
+            "count": len(rows),
+            "median_price": round(statistics.median(ps)) if ps else None,
+            "median_gross_m2_price": round(statistics.median(gs)) if gs else None,
+            "avg_building_age": round(statistics.mean(aa), 1) if aa else None,
+        })
 
     return {
         "count": len(listings),
         "median_price": round(statistics.median(prices)) if prices else None,
         "avg_price": round(statistics.mean(prices)) if prices else None,
-        "median_gross_m2_price": round(statistics.median(m2s)) if m2s else None,
-        "avg_gross_m2_price": round(statistics.mean(m2s)) if m2s else None,
-        "median_net_m2_price": round(statistics.median(net_m2s)) if net_m2s else None,
-        "avg_net_m2_price": round(statistics.mean(net_m2s)) if net_m2s else None,
-        "avg_building_age": (
-            round(statistics.mean(building_ages), 1)
-            if building_ages else None
-        ),
-        "q1_gross_m2_price": percentile(m2s, 0.25),
-        "q3_gross_m2_price": percentile(m2s, 0.75),
+        "median_gross_m2_price": round(statistics.median(gross)) if gross else None,
+        "median_net_m2_price": round(statistics.median(net)) if net else None,
+        "avg_building_age": round(statistics.mean(ages), 1) if ages else None,
         "by_neighborhood": by_neighborhood,
     }
 
 
 def opportunity_analysis(listings):
-    if not listings:
-        return []
-
     groups = {}
-    for item in listings:
-        groups.setdefault((item.district, item.neighborhood), []).append(item)
+    for x in listings:
+        groups.setdefault((x.district, x.neighborhood), []).append(x)
 
     result = []
 
-    for item in listings:
-        peers = groups[(item.district, item.neighborhood)]
-        net_values = [x.net_price_m2 for x in peers if x.net_price_m2]
-        gross_values = [x.gross_price_m2 for x in peers if x.gross_price_m2]
-
-        median_net = statistics.median(net_values) if net_values else None
+    for x in listings:
+        peers = groups[(x.district, x.neighborhood)]
+        gross_values = [p.gross_price_m2 for p in peers if p.gross_price_m2]
         median_gross = statistics.median(gross_values) if gross_values else None
 
-        net_delta = (
-            ((item.net_price_m2 / median_net) - 1) * 100
-            if median_net and item.net_price_m2
-            else None
-        )
-        gross_delta = (
-            ((item.gross_price_m2 / median_gross) - 1) * 100
-            if median_gross and item.gross_price_m2
+        delta = (
+            ((x.gross_price_m2 / median_gross) - 1) * 100
+            if median_gross and x.gross_price_m2
             else None
         )
 
-        deltas = [v for v in (net_delta, gross_delta) if v is not None]
-        avg_delta = statistics.mean(deltas) if deltas else 0
-        score = max(0, min(100, round(50 - avg_delta * 2)))
+        score = max(0, min(100, round(50 - (delta or 0) * 2)))
 
         if score >= 70:
             label = "Dikkat çekici"
@@ -1302,30 +837,18 @@ def opportunity_analysis(listings):
             label = "Piyasa civarı"
 
         result.append({
-            "id": item.id,
+            "id": x.id,
             "opportunity_score": score,
             "opportunity_label": label,
-            "net_vs_neighborhood_pct": round(net_delta, 1) if net_delta is not None else None,
-            "gross_vs_neighborhood_pct": round(gross_delta, 1) if gross_delta is not None else None,
+            "gross_vs_neighborhood_pct": round(delta, 1) if delta is not None else None,
         })
 
     return result
 
 
-def provider_status():
-    if isinstance(PROVIDER, DatabaseListingProvider):
-        return {
-            "mode": "postgresql",
-            "configured": PROVIDER.configured(),
-            "label": "HLF PAS kayıt sistemi · PostgreSQL",
-        }
-
-    return {
-        "mode": "demo",
-        "configured": True,
-        "label": "Demo veri",
-    }
-
+# =========================================================
+# UI
+# =========================================================
 
 PAGE = r"""
 <!doctype html>
@@ -1343,66 +866,55 @@ h1{font-size:46px;margin:0}
 .card{background:#fff;border-radius:18px;padding:16px;margin-bottom:14px;box-shadow:0 4px 18px rgba(0,0,0,.07)}
 .title{font-size:19px;font-weight:800;margin-bottom:11px}
 .small{font-size:13px;color:#6b7280}
-.badge{display:inline-block;padding:5px 8px;border-radius:999px;background:#eef2f7;font-size:12px;font-weight:700}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.notice{background:#eef6ff;border:1px solid #cfe3ff;border-radius:10px;padding:10px;font-size:13px}
+.error{background:#fff1f1;border:1px solid #f4c4c4;border-radius:10px;padding:10px;font-size:13px;white-space:pre-wrap}
+.grid,.pair,.metrics,.neighborhoods{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .check{display:flex;align-items:center;gap:8px;padding:10px;border:1px solid #d9dde3;border-radius:11px;background:#fff}
 .check input{width:18px;height:18px}
-.favorite{background:#fffaf0;border:1px solid #eadfbe;border-radius:12px;padding:11px;margin-bottom:10px}
+.favorite{background:#fffaf0;border:1px solid #eadfbe;border-radius:12px;padding:11px}
 .segmented{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:12px}
 .seg input{display:none}
-.seg span{display:block;text-align:center;padding:11px 5px;border:1px solid #d9dde3;border-radius:10px;font-weight:700}
-.seg input:checked+span{background:#1f2937;color:white;border-color:#1f2937}
+.seg span{display:block;text-align:center;padding:11px;border:1px solid #d9dde3;border-radius:10px;font-weight:700}
+.seg input:checked+span{background:#1f2937;color:#fff}
 details{border:1px solid #d9dde3;border-radius:12px;padding:0 11px;margin-top:9px}
-summary{padding:11px 0;font-weight:800;cursor:pointer}
+summary{padding:11px 0;font-weight:800}
 .neighborhood-box{border:1px solid #d9dde3;border-radius:12px;margin-top:10px;overflow:hidden}
-.neighborhood-head{background:#f2f3f5;padding:10px 12px;font-weight:800;display:flex;justify-content:space-between}
-.neighborhoods{padding:9px;display:grid;grid-template-columns:1fr 1fr;gap:7px}
-label.field{display:block;font-weight:800;margin:10px 0 5px}
-input[type=number],input[type=text],select{width:100%;padding:11px;border:1px solid #d9dde3;border-radius:10px;font-size:16px}
-.pair{display:grid;grid-template-columns:1fr 1fr;gap:9px}
-.primary{width:100%;margin-top:14px;padding:15px;border:0;border-radius:11px;background:#181818;color:#fff;font-size:18px;font-weight:800}
-.primary:disabled{opacity:.55}
-.secondary{width:100%;margin-top:9px;padding:13px;border:1px solid #ccd2da;border-radius:11px;background:#fff;color:#18202b;font-size:16px;font-weight:800}
-.secondary:disabled{opacity:.55}
-.sync-note{margin-top:8px;font-size:12px;color:#6b7280}
+.neighborhood-head{background:#f2f3f5;padding:10px 12px;font-weight:800}
+.neighborhoods{padding:9px}
+.field{display:block;font-weight:800;margin:10px 0 5px}
+input[type=number],select{width:100%;padding:11px;border:1px solid #d9dde3;border-radius:10px;font-size:16px}
+.primary,.secondary{width:100%;margin-top:10px;padding:14px;border-radius:11px;font-size:17px;font-weight:800}
+.primary{border:0;background:#181818;color:#fff}
+.secondary{border:1px solid #ccd2da;background:#fff;color:#18202b}
+.primary:disabled,.secondary:disabled{opacity:.55}
 .hidden{display:none!important}
-.metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
 .metric{padding:12px;border:1px solid #e1e5ea;border-radius:12px}
 .metric .k{font-size:12px;color:#6b7280}
-.metric .v{font-size:20px;font-weight:800;margin-top:3px}
+.metric .v{font-size:20px;font-weight:800}
 .table-wrap{overflow-x:auto}
-a{cursor:pointer}
-.listing-clickable{cursor:pointer}
-.listing-clickable:hover{background:#f7f8fa}
-.open-listing{font-size:12px;font-weight:700;text-decoration:underline}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{padding:10px 8px;border-bottom:1px solid #eceff3;text-align:left;white-space:nowrap}
-th{font-size:12px;color:#6b7280}
-.notice{background:#eef6ff;border:1px solid #cfe3ff;border-radius:10px;padding:10px;font-size:13px}
-.error{background:#fff1f1;border:1px solid #f4c4c4;border-radius:10px;padding:10px;font-size:13px}
-@media(max-width:600px){
- .grid,.neighborhoods,.pair,.metrics{grid-template-columns:1fr 1fr}
-}
+.badge{padding:5px 8px;border-radius:999px;background:#eef2f7;font-size:12px}
+.listing-clickable{cursor:pointer}
+@media(max-width:600px){.grid,.pair,.metrics,.neighborhoods{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body>
 <div class="container">
+
 <h1>HLF PAS</h1>
-<div class="subtitle">Piyasa Arama Sistemi <span class="small">v3.2-safe1</span></div>
+<div class="subtitle">Piyasa Arama Sistemi <span class="small">v3.3-realestate-safe1</span></div>
 
 <div class="card">
 <div class="notice">
-<strong>Veri sağlayıcı:</strong> {{ provider_status.label }}.
-{% if provider_status.mode == "postgresql" %}
-Normal aramalar kayıtlı veriden yapılır ve Apify ücreti oluşturmaz.
-Yeni ilanlar yalnızca "Yeni ilanları güncelle" düğmesiyle alınır.
-{% else %}
-Şu an demo veri kullanılıyor.
-{% endif %}
+<strong>Veri sağlayıcı:</strong> PostgreSQL kayıt sistemi.<br>
+Normal analiz Apify çalıştırmaz. Canlı test <strong>Real Estate Scraper</strong> ile ilçe bazında sadece <strong>1 ilan</strong> çeker.
+Seçili mahalleyle eşleşmeyen ilan kaydedilmez.
 </div>
 </div>
 
 <form id="pasForm">
+
 <div class="card">
 <div class="title">Bölge seçimi</div>
 
@@ -1445,17 +957,17 @@ Yeni ilanlar yalnızca "Yeni ilanları güncelle" düğmesiyle alınır.
 
 <details>
 <summary>Net m² satış fiyatı</summary>
-<div class="pair" style="padding-bottom:10px">
-<div><label class="field">Min TL/m²</label><input name="net_m2_min" type="number" min="0"></div>
-<div><label class="field">Max TL/m²</label><input name="net_m2_max" type="number" min="0"></div>
+<div class="pair">
+<input name="net_m2_min" type="number" placeholder="Min TL/m²">
+<input name="net_m2_max" type="number" placeholder="Max TL/m²">
 </div>
 </details>
 
 <details>
 <summary>Brüt m² satış fiyatı</summary>
-<div class="pair" style="padding-bottom:10px">
-<div><label class="field">Min TL/m²</label><input name="gross_m2_min" type="number" min="0"></div>
-<div><label class="field">Max TL/m²</label><input name="gross_m2_max" type="number" min="0"></div>
+<div class="pair">
+<input name="gross_m2_min" type="number" placeholder="Min TL/m²">
+<input name="gross_m2_max" type="number" placeholder="Max TL/m²">
 </div>
 </details>
 
@@ -1470,9 +982,13 @@ Yeni ilanlar yalnızca "Yeni ilanları güncelle" düğmesiyle alınır.
 </select>
 
 <button class="primary" id="searchButton" type="submit">Kayıtlı İlanları Analiz Et</button>
-<button class="secondary" id="syncButton" type="button">Yeni İlanı Test Et (Apify · 1 İlan)</button>
-<button class="secondary" id="historyButton" type="button">Önceki Apify Verilerini İçe Aktar (Yeni Ücret Yok)</button>
-<div class="sync-note">Normal analiz PostgreSQL’den ve ücretsizdir. Canlı test seçili tek mahallede yalnızca 1 ilan çeker. Önceki Apify verilerini içe aktarma yeni Actor run başlatmaz.</div>
+<button class="secondary" id="syncButton" type="button">Real Estate Canlı Test (1 İlan)</button>
+<button class="secondary" id="historyButton" type="button">Eski Real Estate Verilerini İçe Aktar (Yeni Ücret Yok)</button>
+
+<div class="small" style="margin-top:10px">
+Önce eski başarılı Real Estate run'larını içe aktarmak en güvenli adımdır.
+Canlı Actor'ın resmi inputunda mahalle filtresi bulunmadığından tek ilanlık test ilçe bazında yapılır.
+</div>
 </div>
 </form>
 
@@ -1480,254 +996,312 @@ Yeni ilanlar yalnızca "Yeni ilanları güncelle" düğmesiyle alınır.
 <div id="syncBox" class="card hidden"><div class="notice" id="syncText"></div></div>
 
 <div id="resultsCard" class="card hidden">
-<div class="title">Piyasa özeti <span class="badge" id="providerBadge"></span></div>
+<div class="title">Piyasa özeti <span class="badge">kayıt</span></div>
+
 <div class="metrics">
 <div class="metric"><div class="k">İlan sayısı</div><div class="v" id="mCount">-</div></div>
 <div class="metric"><div class="k">Medyan fiyat</div><div class="v" id="mMedianPrice">-</div></div>
 <div class="metric"><div class="k">Ort. fiyat</div><div class="v" id="mAvgPrice">-</div></div>
 <div class="metric"><div class="k">Medyan brüt TL/m²</div><div class="v" id="mMedianM2">-</div></div>
 <div class="metric"><div class="k">Medyan net TL/m²</div><div class="v" id="mMedianNetM2">-</div></div>
-<div class="metric"><div class="k">Ort. bina yaşı</div><div class="v" id="mAvgBuildingAge">-</div></div>
-</div>
-
-<div class="title" style="margin-top:16px">Mahalle karşılaştırması</div>
-<div class="table-wrap">
-<table>
-<thead><tr><th>Bölge</th><th>İlan</th><th>Medyan fiyat</th><th>Medyan TL/m²</th><th>Ort. bina yaşı</th></tr></thead>
-<tbody id="neighborhoodStats"></tbody>
-</table>
+<div class="metric"><div class="k">Ort. bina yaşı</div><div class="v" id="mAvgAge">-</div></div>
 </div>
 
 <div class="title" style="margin-top:16px">İlanlar</div>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Mahalle</th><th>Oda</th><th>Bina yaşı</th><th>Brüt</th><th>Net</th><th>Fiyat</th><th>Brüt TL/m²</th><th>Net TL/m²</th><th>Mahalleye göre</th><th>PAS puanı</th><th>Tarih</th></tr></thead>
+<thead>
+<tr>
+<th>Mahalle</th><th>Oda</th><th>Yaş</th><th>Brüt</th><th>Net</th>
+<th>Fiyat</th><th>Brüt TL/m²</th><th>PAS</th>
+</tr>
+</thead>
 <tbody id="listingRows"></tbody>
 </table>
 </div>
 </div>
+
 </div>
 
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
+const STATE_KEY="hlf_pas_last_state_v3";
+
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
 
 function esc(s){
- return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+ return String(s??"").replace(/[&<>"']/g,c=>({
+  "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+ }[c]));
 }
-function fmtMoney(n){
- if(n===null||n===undefined)return "-";
- return new Intl.NumberFormat("tr-TR").format(n)+" ₺";
+
+function money(n){
+ return n==null?"-":new Intl.NumberFormat("tr-TR").format(n)+" ₺";
 }
+
 function sideValue(){
  return document.querySelector('input[name="side"]:checked')?.value||"all";
 }
-function districtHtml(d){
- const checked=selectedDistricts.has(d.name)?"checked":"";
- return `<label class="check"><input class="districtCheck" type="checkbox" value="${esc(d.name)}" ${checked}><span>${esc(d.name)}${d.favorite?" ★":""}</span></label>`;
+
+function domSlug(s){
+ return s.toLocaleLowerCase("tr-TR")
+  .normalize("NFD")
+  .replace(/[\u0300-\u036f]/g,"")
+  .replace(/[^a-z0-9]+/g,"-");
 }
+
+function districtHtml(d){
+ return `<label class="check">
+  <input class="districtCheck" type="checkbox" value="${esc(d.name)}"
+   ${selectedDistricts.has(d.name)?"checked":""}>
+  <span>${esc(d.name)}${d.favorite?" ★":""}</span>
+ </label>`;
+}
+
 function renderDistricts(){
  const side=sideValue();
  const visible=DISTRICTS.filter(d=>side==="all"||d.side===side);
- document.getElementById("districts").innerHTML=visible.map(districtHtml).join("");
- document.getElementById("favorites").innerHTML=visible.filter(d=>d.favorite).map(districtHtml).join("");
- bindDistricts();
-}
-function syncCopies(name,checked){
- document.querySelectorAll(".districtCheck").forEach(cb=>{if(cb.value===name)cb.checked=checked});
-}
-function slugDom(s){
- return s.toLocaleLowerCase("tr-TR").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g,"-");
-}
-function bindDistricts(){
+
+ document.getElementById("districts").innerHTML=
+  visible.map(districtHtml).join("");
+
+ document.getElementById("favorites").innerHTML=
+  visible.filter(d=>d.favorite).map(districtHtml).join("");
+
  document.querySelectorAll(".districtCheck").forEach(cb=>{
   cb.onchange=()=>{
-   syncCopies(cb.value,cb.checked);
+   document.querySelectorAll(".districtCheck").forEach(x=>{
+    if(x.value===cb.value)x.checked=cb.checked;
+   });
+
    if(cb.checked){
     selectedDistricts.add(cb.value);
     renderNeighborhoodBlock(cb.value);
    }else{
     selectedDistricts.delete(cb.value);
-    document.getElementById("nb-"+slugDom(cb.value))?.remove();
+    document.getElementById("nb-"+domSlug(cb.value))?.remove();
     syncSelectedNeighborhoods();
    }
+
+   saveState();
   };
  });
-}
-function syncSelectedNeighborhoods(){
- const fresh={};
- selectedDistricts.forEach(district=>{
-  const wrap=document.getElementById("nb-"+slugDom(district));
-  if(!wrap){
-   fresh[district]=[];
-   return;
-  }
-  fresh[district]=[...wrap.querySelectorAll(".neighborhoodCheck:checked")].map(x=>x.value);
- });
- selectedNeighborhoods=fresh;
 }
 
 function renderNeighborhoodBlock(district){
- const id="nb-"+slugDom(district);
- const existing=document.getElementById(id);
- if(existing){
-  existing.remove();
- }
- const list=NEIGHBORHOODS[district]||[];
+ const id="nb-"+domSlug(district);
+ document.getElementById(id)?.remove();
+
  const selected=new Set(selectedNeighborhoods[district]||[]);
  const wrap=document.createElement("div");
- wrap.className="neighborhood-box";
+
  wrap.id=id;
+ wrap.className="neighborhood-box";
  wrap.innerHTML=`
-  <div class="neighborhood-head"><span>${esc(district)} mahalleleri</span><span class="small">${list.length} seçenek</span></div>
+  <div class="neighborhood-head">${esc(district)} mahalleleri</div>
   <div class="neighborhoods">
-   ${list.map(n=>`<label class="check"><input class="neighborhoodCheck" type="checkbox" value="${esc(n)}" ${selected.has(n)?"checked":""}><span>${esc(n)}</span></label>`).join("")}
-  </div>
- `;
+   ${(NEIGHBORHOODS[district]||[]).map(n=>`
+    <label class="check">
+     <input class="neighborhoodCheck" type="checkbox" value="${esc(n)}"
+      ${selected.has(n)?"checked":""}>
+     <span>${esc(n)}</span>
+    </label>
+   `).join("")}
+  </div>`;
+
  document.getElementById("neighborhoodArea").appendChild(wrap);
+
  wrap.querySelectorAll(".neighborhoodCheck").forEach(cb=>{
   cb.onchange=()=>{
    syncSelectedNeighborhoods();
+   saveState();
   };
  });
+
  syncSelectedNeighborhoods();
 }
 
-document.querySelectorAll('input[name="side"]').forEach(el=>{
- el.addEventListener("change",renderDistricts);
-});
+function syncSelectedNeighborhoods(){
+ const fresh={};
 
-// iPhone/Safari uyumluluğu:
-// fetch() yerine XMLHttpRequest kullanıyoruz. Bazı Safari sürümlerinde
-// fetch(relativeUrl, options) DOMException:
-// "The string did not match the expected pattern." üretebiliyor.
+ selectedDistricts.forEach(d=>{
+  const wrap=document.getElementById("nb-"+domSlug(d));
+  fresh[d]=wrap
+   ? [...wrap.querySelectorAll(".neighborhoodCheck:checked")].map(x=>x.value)
+   : [];
+ });
+
+ selectedNeighborhoods=fresh;
+}
+
+function getOnePair(){
+ syncSelectedNeighborhoods();
+ const pairs=[];
+
+ [...selectedDistricts].forEach(d=>{
+  (selectedNeighborhoods[d]||[]).forEach(n=>pairs.push([d,n]));
+ });
+
+ return pairs;
+}
+
 function postJson(path,payload){
  return new Promise((resolve,reject)=>{
-  try{
-   const xhr=new XMLHttpRequest();
-   const url=window.location.origin + path;
-   xhr.open("POST",url,true);
-   xhr.setRequestHeader("Content-Type","application/json; charset=UTF-8");
-   xhr.setRequestHeader("Accept","application/json");
-   xhr.onreadystatechange=()=>{
-    if(xhr.readyState!==4)return;
-    let data={};
-    try{
-     data=xhr.responseText ? JSON.parse(xhr.responseText) : {};
-    }catch(parseErr){
-     reject(new Error("Sunucu geçerli JSON döndürmedi. HTTP "+xhr.status));
-     return;
-    }
-    resolve({ok:xhr.status>=200&&xhr.status<300,status:xhr.status,data});
-   };
-   xhr.onerror=()=>reject(new Error("Sunucuya bağlantı kurulamadı."));
-   xhr.ontimeout=()=>reject(new Error("İstek zaman aşımına uğradı."));
-   xhr.timeout=360000;
-   xhr.send(JSON.stringify(payload));
-  }catch(err){
-   reject(new Error("İstek hazırlanamadı: "+(err.message||String(err))));
-  }
+  const xhr=new XMLHttpRequest();
+
+  xhr.open("POST",window.location.origin+path,true);
+  xhr.setRequestHeader("Content-Type","application/json; charset=UTF-8");
+  xhr.setRequestHeader("Accept","application/json");
+  xhr.timeout=360000;
+
+  xhr.onreadystatechange=()=>{
+   if(xhr.readyState!==4)return;
+
+   let data={};
+
+   try{
+    data=xhr.responseText?JSON.parse(xhr.responseText):{};
+   }catch(_e){
+    reject(new Error("Sunucu geçerli JSON döndürmedi. HTTP "+xhr.status));
+    return;
+   }
+
+   resolve({
+    ok:xhr.status>=200&&xhr.status<300,
+    status:xhr.status,
+    data
+   });
+  };
+
+  xhr.onerror=()=>reject(new Error("Sunucuya bağlantı kurulamadı."));
+  xhr.ontimeout=()=>reject(new Error("İstek zaman aşımına uğradı."));
+
+  xhr.send(JSON.stringify(payload));
  });
+}
+
+function showError(text){
+ document.getElementById("errorText").textContent=text;
+ document.getElementById("errorBox").classList.remove("hidden");
+ document.getElementById("syncBox").classList.add("hidden");
+}
+
+function showSuccess(text){
+ document.getElementById("syncText").textContent=text;
+ document.getElementById("syncBox").classList.remove("hidden");
+ document.getElementById("errorBox").classList.add("hidden");
 }
 
 document.getElementById("pasForm").addEventListener("submit",async e=>{
  e.preventDefault();
- const errorBox=document.getElementById("errorBox");
- const resultsCard=document.getElementById("resultsCard");
- errorBox.classList.add("hidden");
+
+ syncSelectedNeighborhoods();
 
  if(selectedDistricts.size===0){
-  document.getElementById("errorText").textContent="En az bir ilçe seçin.";
-  errorBox.classList.remove("hidden");
+  showError("En az bir ilçe seçin.");
   return;
  }
 
- const button=document.getElementById("searchButton");
- const oldText=button.textContent;
- button.disabled=true;
- button.textContent="Veriler hazırlanıyor…";
+ const fd=new FormData(e.target);
 
- syncSelectedNeighborhoods();
- const formData=new FormData(e.target);
  const payload={
   districts:[...selectedDistricts],
   neighborhoods:selectedNeighborhoods,
-  rooms:formData.get("rooms")||"",
-  min_m2:formData.get("min_m2")||"",
-  max_m2:formData.get("max_m2")||"",
-  min_price:formData.get("min_price")||"",
-  max_price:formData.get("max_price")||"",
-  building_age_min:formData.get("building_age_min")||"",
-  building_age_max:formData.get("building_age_max")||"",
-  net_m2_min:formData.get("net_m2_min")||"",
-  net_m2_max:formData.get("net_m2_max")||"",
-  gross_m2_min:formData.get("gross_m2_min")||"",
-  gross_m2_max:formData.get("gross_m2_max")||""
+  rooms:fd.get("rooms")||"",
+  min_m2:fd.get("min_m2")||"",
+  max_m2:fd.get("max_m2")||"",
+  min_price:fd.get("min_price")||"",
+  max_price:fd.get("max_price")||"",
+  building_age_min:fd.get("building_age_min")||"",
+  building_age_max:fd.get("building_age_max")||"",
+  net_m2_min:fd.get("net_m2_min")||"",
+  net_m2_max:fd.get("net_m2_max")||"",
+  gross_m2_min:fd.get("gross_m2_min")||"",
+  gross_m2_max:fd.get("gross_m2_max")||""
  };
+
+ const button=document.getElementById("searchButton");
+ button.disabled=true;
 
  try{
   const result=await postJson("/api/search",payload);
   const data=result.data;
-  if(!result.ok||!data.ok)throw new Error(data.error||("Arama başarısız. HTTP "+result.status));
 
-  document.getElementById("providerBadge").textContent=data.provider;
+  if(!result.ok||!data.ok){
+   throw new Error(data.error||("Arama başarısız. HTTP "+result.status));
+  }
+
   document.getElementById("mCount").textContent=data.analysis.count;
-  document.getElementById("mMedianPrice").textContent=fmtMoney(data.analysis.median_price);
-  document.getElementById("mAvgPrice").textContent=fmtMoney(data.analysis.avg_price);
-  document.getElementById("mMedianM2").textContent=fmtMoney(data.analysis.median_gross_m2_price);
-  document.getElementById("mMedianNetM2").textContent=fmtMoney(data.analysis.median_net_m2_price);
-  document.getElementById("mAvgBuildingAge").textContent=
-   data.analysis.avg_building_age==null ? "-" : data.analysis.avg_building_age+" yıl";
-
-  document.getElementById("neighborhoodStats").innerHTML=
-   data.analysis.by_neighborhood.map(r=>`
-    <tr>
-     <td>${esc(r.name)}</td>
-     <td>${r.count}</td>
-     <td>${fmtMoney(r.median_price)}</td>
-     <td>${fmtMoney(r.median_gross_m2_price)}</td>
-     <td>${r.avg_building_age==null?"-":r.avg_building_age+" yıl"}</td>
-    </tr>
-   `).join("");
+  document.getElementById("mMedianPrice").textContent=money(data.analysis.median_price);
+  document.getElementById("mAvgPrice").textContent=money(data.analysis.avg_price);
+  document.getElementById("mMedianM2").textContent=money(data.analysis.median_gross_m2_price);
+  document.getElementById("mMedianNetM2").textContent=money(data.analysis.median_net_m2_price);
+  document.getElementById("mAvgAge").textContent=
+   data.analysis.avg_building_age==null?"-":data.analysis.avg_building_age+" yıl";
 
   document.getElementById("listingRows").innerHTML=
-   data.listings.map(r=>{
-    const href = r.url ? esc(String(r.url)) : "";
-    const place = `${esc(r.district)} · ${esc(r.neighborhood)}`;
-    const openText = href ? `<span class="open-listing">İlanı aç ↗</span>` : "";
-
-    return `
-    <tr class="${href?"listing-clickable":""}" ${href?`data-url="${href}"`:""}>
-     <td><strong>${place}</strong><div class="small">${openText}</div></td>
+   data.listings.map(r=>`
+    <tr class="${r.url?"listing-clickable":""}" data-url="${esc(r.url||"")}">
+     <td>${esc(r.district)} · ${esc(r.neighborhood)}</td>
      <td>${esc(r.rooms)}</td>
      <td>${r.building_age==null?"-":r.building_age+" yıl"}</td>
      <td>${r.gross_m2==null?"-":r.gross_m2+" m²"}</td>
      <td>${r.net_m2==null?"-":r.net_m2+" m²"}</td>
-     <td>${fmtMoney(r.price)}</td>
-     <td>${fmtMoney(r.gross_price_m2)}</td>
-     <td>${fmtMoney(r.net_price_m2)}</td>
-     <td>${r.net_vs_neighborhood_pct==null?"-":(r.net_vs_neighborhood_pct>0?"+":"")+r.net_vs_neighborhood_pct+"%"}</td>
-     <td><strong>${r.opportunity_score ?? "-"}</strong><div class="small">${esc(r.opportunity_label||"")}</div></td>
-     <td>${esc(r.listing_date)}</td>
+     <td>${money(r.price)}</td>
+     <td>${money(r.gross_price_m2)}</td>
+     <td>${r.opportunity_score??"-"} <span class="small">${esc(r.opportunity_label||"")}</span></td>
     </tr>
-   `;
-   }).join("");
+   `).join("");
 
-  document.querySelectorAll("#listingRows tr.listing-clickable").forEach(tr=>{
-   tr.addEventListener("click",()=>{
-    const url=tr.dataset.url;
-    if(url){
-     window.location.assign(url);
-    }
-   });
+  document.querySelectorAll(".listing-clickable").forEach(tr=>{
+   tr.onclick=()=>{
+    if(tr.dataset.url)window.location.assign(tr.dataset.url);
+   };
   });
 
-  resultsCard.classList.remove("hidden");
+  document.getElementById("resultsCard").classList.remove("hidden");
+
  }catch(err){
-  document.getElementById("errorText").textContent=err.message||"Beklenmeyen hata.";
-  errorBox.classList.remove("hidden");
+  showError(err.message||"Beklenmeyen hata.");
+ }finally{
+  button.disabled=false;
+ }
+});
+
+
+document.getElementById("historyButton").addEventListener("click",async()=>{
+ const pairs=getOnePair();
+
+ if(pairs.length!==1){
+  showError("Eski verileri içe aktarmak için tam olarak 1 mahalle seçin.");
+  return;
+ }
+
+ const [district,neighborhood]=pairs[0];
+ const button=document.getElementById("historyButton");
+ const oldText=button.textContent;
+
+ button.disabled=true;
+ button.textContent="Eski Real Estate datasetleri aranıyor…";
+
+ try{
+  const result=await postJson("/api/import-history",{district,neighborhood});
+  const data=result.data;
+
+  if(!result.ok||!data.ok){
+   throw new Error(data.error||("İçe aktarma başarısız. HTTP "+result.status));
+  }
+
+  showSuccess(
+   `${district} · ${neighborhood}: ${data.received} doğru eski ilan bulundu. `+
+   `${data.new} yeni kayıt, ${data.updated} güncelleme. `+
+   `Yeni Actor run BAŞLATILMADI.`
+  );
+
+ }catch(err){
+  showError(err.message||"İçe aktarma hatası.");
  }finally{
   button.disabled=false;
   button.textContent=oldText;
@@ -1735,50 +1309,37 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
 });
 
 
-document.getElementById("syncButton").addEventListener("click",async ()=>{
- const errorBox=document.getElementById("errorBox");
- const syncBox=document.getElementById("syncBox");
- errorBox.classList.add("hidden");
- syncBox.classList.add("hidden");
+document.getElementById("syncButton").addEventListener("click",async()=>{
+ const pairs=getOnePair();
 
- syncSelectedNeighborhoods();
-
- const districts=[...selectedDistricts];
- const selectedPairs=[];
- districts.forEach(d=>{
-  (selectedNeighborhoods[d]||[]).forEach(n=>selectedPairs.push([d,n]));
- });
-
- if(selectedPairs.length!==1){
-  document.getElementById("errorText").textContent=
-   "Güncelleme için tam olarak 1 mahalle seçin. Bu, gereksiz Apify maliyetini önler.";
-  errorBox.classList.remove("hidden");
+ if(pairs.length!==1){
+  showError("Canlı test için tam olarak 1 mahalle seçin.");
   return;
  }
 
- const [district,neighborhood]=selectedPairs[0];
+ const [district,neighborhood]=pairs[0];
  const button=document.getElementById("syncButton");
  const oldText=button.textContent;
+
  button.disabled=true;
- button.textContent="1 ilan kontrol ediliyor…";
+ button.textContent="Real Estate Actor 1 ilan kontrol ediyor…";
 
  try{
   const result=await postJson("/api/sync",{district,neighborhood});
   const data=result.data;
-  if(!result.ok||!data.ok)throw new Error(data.error||("Güncelleme başarısız. HTTP "+result.status));
 
-  document.getElementById("syncText").textContent=
-   `${district} · ${neighborhood}: ${data.received} sonuç alındı, `+
-   `${data.new} yeni ilan eklendi, ${data.updated} mevcut ilan güncellendi.`;
-  syncBox.classList.remove("hidden");
+  if(!result.ok||!data.ok){
+   throw new Error(data.error||("Canlı test başarısız. HTTP "+result.status));
+  }
 
-  // Safari/iPhone uyumluluğu:
-  // Sync başarılı olduktan sonra formu otomatik tetiklemiyoruz.
-  // Kullanıcı "Kayıtlı İlanları Analiz Et" düğmesine basarak
-  // veritabanındaki güncel kayıtları analiz eder.
+  showSuccess(
+   `${district} · ${neighborhood}: ${data.raw_received} ilan çekildi; `+
+   `${data.accepted} hedef mahalleyle eşleşti. `+
+   `${data.new} yeni kayıt, ${data.updated} güncelleme.`
+  );
+
  }catch(err){
-  document.getElementById("errorText").textContent=err.message||"Güncelleme hatası.";
-  errorBox.classList.remove("hidden");
+  showError(err.message||"Canlı test hatası.");
  }finally{
   button.disabled=false;
   button.textContent=oldText;
@@ -1786,123 +1347,78 @@ document.getElementById("syncButton").addEventListener("click",async ()=>{
 });
 
 
-document.getElementById("historyButton").addEventListener("click",async ()=>{
- const errorBox=document.getElementById("errorBox");
- const syncBox=document.getElementById("syncBox");
- errorBox.classList.add("hidden"); syncBox.classList.add("hidden");
+function collectState(){
  syncSelectedNeighborhoods();
- const pairs=[];
- [...selectedDistricts].forEach(d=>(selectedNeighborhoods[d]||[]).forEach(n=>pairs.push([d,n])));
- if(pairs.length!==1){
-  document.getElementById("errorText").textContent="İçe aktarma için tam olarak 1 mahalle seçin.";
-  errorBox.classList.remove("hidden"); return;
- }
- const [district,neighborhood]=pairs[0];
- const button=document.getElementById("historyButton"); const old=button.textContent;
- button.disabled=true; button.textContent="Önceki ücretli veriler aranıyor…";
+
+ const fd=new FormData(document.getElementById("pasForm"));
+ const filters={};
+
+ [
+  "rooms","min_m2","max_m2","min_price","max_price",
+  "building_age_min","building_age_max",
+  "net_m2_min","net_m2_max","gross_m2_min","gross_m2_max"
+ ].forEach(k=>filters[k]=fd.get(k)||"");
+
+ return {
+  side:sideValue(),
+  districts:[...selectedDistricts],
+  neighborhoods:selectedNeighborhoods,
+  filters
+ };
+}
+
+function saveState(){
  try{
-  const result=await postJson("/api/import-history",{district,neighborhood});
-  const data=result.data;
-  if(!result.ok||!data.ok) throw new Error(data.error||("İçe aktarma başarısız. HTTP "+result.status));
-  document.getElementById("syncText").textContent=
-   `${district} · ${neighborhood}: ${data.received} eski Apify kaydı bulundu; ${data.new} yeni, ${data.updated} güncellendi. Yeni Actor run başlatılmadı.`;
-  syncBox.classList.remove("hidden");
- }catch(err){
-  document.getElementById("errorText").textContent=err.message||"İçe aktarma hatası.";
-  errorBox.classList.remove("hidden");
- }finally{button.disabled=false;button.textContent=old;}
-});
-
-
-// =========================================================
-// HLF PAS — son seçimleri ve filtreleri hatırla
-// localStorage kullanır; yeni deploy sonrası da korunur.
-// =========================================================
-const PAS_STATE_KEY = "hlf_pas_last_state_v1";
-
-function collectPasState(){
-  syncSelectedNeighborhoods();
-  const form = document.getElementById("pasForm");
-  const fd = new FormData(form);
-
-  return {
-    side: sideValue(),
-    districts: [...selectedDistricts],
-    neighborhoods: selectedNeighborhoods,
-    filters: {
-      rooms: fd.get("rooms") || "",
-      min_m2: fd.get("min_m2") || "",
-      max_m2: fd.get("max_m2") || "",
-      min_price: fd.get("min_price") || "",
-      max_price: fd.get("max_price") || "",
-      building_age_min: fd.get("building_age_min") || "",
-      building_age_max: fd.get("building_age_max") || "",
-      net_m2_min: fd.get("net_m2_min") || "",
-      net_m2_max: fd.get("net_m2_max") || "",
-      gross_m2_min: fd.get("gross_m2_min") || "",
-      gross_m2_max: fd.get("gross_m2_max") || ""
-    }
-  };
+  localStorage.setItem(STATE_KEY,JSON.stringify(collectState()));
+ }catch(_e){}
 }
 
-function savePasState(){
-  try{
-    localStorage.setItem(PAS_STATE_KEY, JSON.stringify(collectPasState()));
-  }catch(_e){}
+function loadState(){
+ let saved=null;
+
+ try{
+  saved=JSON.parse(localStorage.getItem(STATE_KEY)||"null");
+ }catch(_e){}
+
+ if(!saved)return;
+
+ const sideEl=document.querySelector(
+  `input[name="side"][value="${saved.side||"all"}"]`
+ );
+
+ if(sideEl)sideEl.checked=true;
+
+ selectedDistricts=new Set(
+  (saved.districts||[])
+   .filter(d=>DISTRICTS.some(x=>x.name===d))
+ );
+
+ selectedNeighborhoods=saved.neighborhoods||{};
+
+ renderDistricts();
+
+ selectedDistricts.forEach(d=>{
+  renderNeighborhoodBlock(d);
+ });
+
+ Object.entries(saved.filters||{}).forEach(([name,value])=>{
+  const el=document.querySelector(`[name="${name}"]`);
+  if(el)el.value=value||"";
+ });
 }
 
-function applySavedPasState(){
-  let saved = null;
-  try{
-    saved = JSON.parse(localStorage.getItem(PAS_STATE_KEY) || "null");
-  }catch(_e){
-    saved = null;
-  }
-  if(!saved || typeof saved !== "object") return;
-
-  const savedSide = saved.side || "all";
-  const sideEl = document.querySelector(`input[name="side"][value="${savedSide}"]`);
-  if(sideEl) sideEl.checked = true;
-
-  selectedDistricts = new Set(
-    Array.isArray(saved.districts)
-      ? saved.districts.filter(d => DISTRICTS.some(x => x.name === d))
-      : []
-  );
-
-  selectedNeighborhoods = {};
-  const rawNbs = saved.neighborhoods || {};
-  selectedDistricts.forEach(d=>{
-    const allowed = new Set(NEIGHBORHOODS[d] || []);
-    selectedNeighborhoods[d] = Array.isArray(rawNbs[d])
-      ? rawNbs[d].filter(n => allowed.has(n))
-      : [];
-  });
-
+document.querySelectorAll('input[name="side"]').forEach(el=>{
+ el.addEventListener("change",()=>{
   renderDistricts();
-
-  selectedDistricts.forEach(d=>{
-    syncCopies(d, true);
-    renderNeighborhoodBlock(d);
-  });
-
-  const filters = saved.filters || {};
-  Object.entries(filters).forEach(([name,value])=>{
-    const el = document.querySelector(`[name="${name}"]`);
-    if(el) el.value = value ?? "";
-  });
-
-  syncSelectedNeighborhoods();
-}
-
-document.getElementById("pasForm").addEventListener("change", savePasState);
-document.getElementById("pasForm").addEventListener("input", e=>{
-  if(e.target && (e.target.matches('input[type="number"]') || e.target.matches('select'))){
-    savePasState();
-  }
+  saveState();
+ });
 });
 
-applySavedPasState();
+document.getElementById("pasForm").addEventListener("change",saveState);
+document.getElementById("pasForm").addEventListener("input",saveState);
+
+renderDistricts();
+loadState();
 
 </script>
 </body>
@@ -1910,163 +1426,106 @@ applySavedPasState();
 """
 
 
-@app.route("/", methods=["GET", "POST"])
+# =========================================================
+# Routes
+# =========================================================
+
+@app.get("/")
 def home():
     return render_template_string(
         PAGE,
         districts_json=json.dumps(DISTRICTS, ensure_ascii=False),
         neighborhoods_json=json.dumps(NEIGHBORHOODS, ensure_ascii=False),
-        provider_status=provider_status(),
     )
+
+
+def validate_pair(payload):
+    district = str(payload.get("district") or "").strip()
+    neighborhood = str(payload.get("neighborhood") or "").strip()
+
+    if district not in {d["name"] for d in DISTRICTS}:
+        raise ValueError("Geçersiz ilçe.")
+
+    if neighborhood not in set(NEIGHBORHOODS.get(district, [])):
+        raise ValueError("Geçersiz mahalle.")
+
+    return district, neighborhood
 
 
 @app.post("/api/search")
 def api_search():
     try:
         payload = request.get_json(silent=True) or {}
-        districts = payload.get("districts") or []
 
-        allowed = {d["name"] for d in DISTRICTS}
-        districts = [d for d in districts if d in allowed]
+        allowed_districts = {d["name"] for d in DISTRICTS}
+
+        districts = [
+            d for d in (payload.get("districts") or [])
+            if d in allowed_districts
+        ]
 
         if not districts:
-            return jsonify({
-                "ok": False,
-                "error": "Geçerli bir ilçe seçilmedi."
-            }), 400
+            return jsonify(ok=False, error="Geçerli bir ilçe seçilmedi."), 400
 
         raw_neighborhoods = payload.get("neighborhoods") or {}
         neighborhoods = {}
 
         for district in districts:
             allowed_nbs = set(NEIGHBORHOODS.get(district, []))
-            requested = raw_neighborhoods.get(district) or []
             neighborhoods[district] = [
-                n for n in requested if n in allowed_nbs
+                n for n in (raw_neighborhoods.get(district) or [])
+                if n in allowed_nbs
             ]
 
-        filters = {
-            "districts": districts,
-            "neighborhoods": neighborhoods,
-            "rooms": payload.get("rooms", ""),
-            "min_m2": payload.get("min_m2", ""),
-            "max_m2": payload.get("max_m2", ""),
-            "min_price": payload.get("min_price", ""),
-            "max_price": payload.get("max_price", ""),
-            "building_age_min": payload.get("building_age_min", ""),
-            "building_age_max": payload.get("building_age_max", ""),
-            "net_m2_min": payload.get("net_m2_min", ""),
-            "net_m2_max": payload.get("net_m2_max", ""),
-            "gross_m2_min": payload.get("gross_m2_min", ""),
-            "gross_m2_max": payload.get("gross_m2_max", ""),
+        filters = dict(payload)
+        filters["districts"] = districts
+        filters["neighborhoods"] = neighborhoods
+
+        listings = load_listings_from_db(filters)
+
+        analysis = analyze(listings)
+        opportunity = {
+            str(x["id"]): x
+            for x in opportunity_analysis(listings)
         }
 
-        listings = PROVIDER.search(filters)
-        analysis = analyze(listings)
-        opportunity = opportunity_analysis(listings)
-        opportunity_by_id = {str(x["id"]): x for x in opportunity}
+        rows = []
 
-        listing_rows = []
         for item in listings:
             row = item.to_dict()
-            row.update(opportunity_by_id.get(str(item.id), {}))
+            row.update(opportunity.get(str(item.id), {}))
             row["url"] = getattr(item, "_listing_url", "")
-            listing_rows.append(row)
+            rows.append(row)
 
-        listing_rows.sort(
-            key=lambda x: (
-                x.get("opportunity_score") or 0,
-                x.get("listing_date") or "",
-            ),
-            reverse=True,
+        return jsonify(
+            ok=True,
+            provider="kayıt",
+            analysis=analysis,
+            listings=rows,
         )
 
-        sync_states = []
-        for district in districts:
-            for neighborhood in neighborhoods.get(district) or []:
-                state = get_sync_state(district, neighborhood)
-                if state:
-                    sync_states.append({
-                        "district": district,
-                        "neighborhood": neighborhood,
-                        **state,
-                    })
-
-        return jsonify({
-            "ok": True,
-            "provider": "kayıt",
-            "analysis": analysis,
-            "listings": listing_rows,
-            "sync_states": sync_states,
-            "database_configured": db_configured(),
-        })
-
     except Exception as exc:
-        return jsonify({
-            "ok": False,
-            "error": f"Kayıtlı veri hazırlanırken hata oluştu: {exc}"
-        }), 500
+        return jsonify(
+            ok=False,
+            error=f"Kayıtlı veri hazırlanamadı: {exc}",
+        ), 500
 
 
 @app.post("/api/import-history")
 def api_import_history():
-    """No new Actor run: reuse datasets from successful paid runs."""
     payload = request.get_json(silent=True) or {}
-    district = str(payload.get("district") or "").strip()
-    neighborhood = str(payload.get("neighborhood") or "").strip()
-
-    allowed_districts = {d["name"] for d in DISTRICTS}
-    if district not in allowed_districts:
-        return jsonify({"ok": False, "error": "Geçersiz ilçe."}), 400
-    if neighborhood not in set(NEIGHBORHOODS.get(district, [])):
-        return jsonify({"ok": False, "error": "Geçersiz mahalle."}), 400
 
     try:
-        listings = APIFY_SYNC_PROVIDER.import_paid_history(district, neighborhood, max_items=50)
-        result = save_listings_to_db(listings)
-        record_sync_state(district, neighborhood, result_count=len(listings), error="")
-        return jsonify({"ok": True, "received": len(listings), **result, "new_actor_run": False})
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"Önceki Apify verileri içe aktarılırken hata: {exc}"}), 502
+        district, neighborhood = validate_pair(payload)
 
-
-@app.post("/api/sync")
-def api_sync():
-    """
-    ÜCRETLİ işlem: yalnızca kullanıcının açıkça bastığı
-    'Yeni İlanları Güncelle' düğmesiyle çalışır.
-    """
-    payload = request.get_json(silent=True) or {}
-    district = str(payload.get("district") or "").strip()
-    neighborhood = str(payload.get("neighborhood") or "").strip()
-
-    allowed_districts = {d["name"] for d in DISTRICTS}
-    if district not in allowed_districts:
-        return jsonify({"ok": False, "error": "Geçersiz ilçe."}), 400
-
-    if neighborhood not in set(NEIGHBORHOODS.get(district, [])):
-        return jsonify({"ok": False, "error": "Geçersiz mahalle."}), 400
-
-    try:
-        listings = APIFY_SYNC_PROVIDER.sync_neighborhood(
-            district, neighborhood
+        listings, inspected = APIFY.import_old_real_estate_history(
+            district,
+            neighborhood,
+            max_items=250,
         )
 
-        if not listings:
-            message = (
-                "Apify bu 1 ilanlık testte ham dataset sonucu üretmedi. "
-                "Mevcut PostgreSQL kayıtları korunuyor. Aynı butona tekrar basmayın; "
-                "önce Apify Run ekranı kontrol edilmeli."
-            )
-            record_sync_state(district, neighborhood, result_count=0, error=message)
-            return jsonify({
-                "ok": False,
-                "error": message,
-                "received": 0,
-                "sync_limit": APIFY_SYNC_PROVIDER.max_results,
-            }), 409
+        saved = save_listings_to_db(listings)
 
-        result = save_listings_to_db(listings)
         record_sync_state(
             district,
             neighborhood,
@@ -2074,50 +1533,149 @@ def api_sync():
             error="",
         )
 
-        return jsonify({
-            "ok": True,
-            "district": district,
-            "neighborhood": neighborhood,
-            "received": len(listings),
-            **result,
-            "sync_limit": APIFY_SYNC_PROVIDER.max_results,
-        })
+        return jsonify(
+            ok=True,
+            district=district,
+            neighborhood=neighborhood,
+            received=len(listings),
+            inspected=inspected,
+            new_actor_run=False,
+            **saved,
+        )
+
+    except ValueError as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+
+    except Exception as exc:
+        return jsonify(
+            ok=False,
+            error=f"Eski Real Estate verileri içe aktarılamadı: {exc}",
+        ), 502
+
+
+@app.post("/api/sync")
+def api_sync():
+    payload = request.get_json(silent=True) or {}
+
+    try:
+        district, neighborhood = validate_pair(payload)
+
+        result = APIFY.sync_neighborhood_one_result(
+            district,
+            neighborhood,
+        )
+
+        accepted = result["accepted"]
+        rejected = result["rejected"]
+
+        if not accepted:
+            if result["raw_count"] > 0 and rejected:
+                wrong = rejected[0]
+
+                returned_place = " / ".join(
+                    x for x in (
+                        str(wrong.get("city") or ""),
+                        str(wrong.get("district") or ""),
+                        str(
+                            wrong.get("quarter")
+                            or wrong.get("neighborhood")
+                            or ""
+                        ),
+                    )
+                    if x
+                )
+
+                message = (
+                    f"Real Estate Actor doğru ilçe filtresiyle 1 ilan üretti, "
+                    f"ancak bu ilan seçilen {district} · {neighborhood} mahallesinde değil. "
+                    f"Dönen: {returned_place or 'konum okunamadı'}. "
+                    "İlan PostgreSQL'e kaydedilmedi. "
+                    "Bu normal olabilir çünkü Actor'ın güncel inputunda mahalle filtresi yok; "
+                    "şimdilik tekrar tekrar canlı test yapmayın."
+                )
+
+            else:
+                message = (
+                    "Real Estate Actor 0 sonuç döndürdü. "
+                    "PostgreSQL kayıtları etkilenmedi."
+                )
+
+            record_sync_state(
+                district,
+                neighborhood,
+                result_count=0,
+                error=message,
+            )
+
+            return jsonify(
+                ok=False,
+                error=message,
+                raw_received=result["raw_count"],
+                accepted=0,
+                rejected=len(rejected),
+                actor_input=result["actor_input"],
+            ), 409
+
+        saved = save_listings_to_db(accepted)
+
+        record_sync_state(
+            district,
+            neighborhood,
+            result_count=len(accepted),
+            error="",
+        )
+
+        return jsonify(
+            ok=True,
+            district=district,
+            neighborhood=neighborhood,
+            raw_received=result["raw_count"],
+            accepted=len(accepted),
+            rejected=len(rejected),
+            actor_input=result["actor_input"],
+            sync_limit=1,
+            **saved,
+        )
+
+    except ValueError as exc:
+        return jsonify(ok=False, error=str(exc)), 400
 
     except Exception as exc:
         try:
             record_sync_state(
-                district,
-                neighborhood,
+                str(payload.get("district") or ""),
+                str(payload.get("neighborhood") or ""),
                 result_count=0,
                 error=str(exc)[:700],
             )
         except Exception:
             pass
 
-        return jsonify({
-            "ok": False,
-            "error": (
-                "Yeni ilan güncellemesi yapılamadı: "
-                f"{exc}. Kayıtlı PAS verileri etkilenmedi."
+        return jsonify(
+            ok=False,
+            error=(
+                "Real Estate canlı testi yapılamadı: "
+                f"{exc}. PostgreSQL kayıtları etkilenmedi."
             ),
-        }), 502
+        ), 502
 
 
 @app.get("/api/provider-status")
 def api_provider_status():
-    return jsonify({
-        "ok": True,
-        **provider_status(),
-        "database_configured": db_configured(),
-        "sync_actor_id": APIFY_SYNC_PROVIDER.actor_id,
-        "sync_max_results": APIFY_SYNC_PROVIDER.max_results,
-        "sync_enrichment": APIFY_SYNC_PROVIDER.enrichment,
-        "normal_search_uses_apify": False,
-        "sync_max_charge_usd": APIFY_SYNC_PROVIDER.max_charge_usd,
-        "history_import_starts_new_run": False,
-    })
+    return jsonify(
+        ok=True,
+        database_configured=db_configured(),
+        apify_configured=APIFY.configured(),
+        actor_id=ACTOR_ID,
+        max_results=1,
+        extract_phone_numbers=False,
+        max_items=1,
+        max_total_charge_usd=SYNC_MAX_CHARGE_USD,
+        neighborhood_input_supported=False,
+        normal_search_uses_apify=False,
+    )
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", "8080"))
     app.run(host="0.0.0.0", port=port)
