@@ -6,6 +6,7 @@ import random
 import statistics
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from dataclasses import dataclass, asdict
 from datetime import date, timedelta, datetime, timezone
 
@@ -1522,7 +1523,7 @@ th{font-size:12px;color:#6b7280}
 <body>
 <div class="container">
 <h1>HLF PAS</h1>
-<div class="subtitle">Piyasa Arama Sistemi <span class="small">v3.1</span></div>
+<div class="subtitle">Piyasa Arama Sistemi <span class="small">v3.1.1</span></div>
 
 <div class="card">
 <div class="notice">
