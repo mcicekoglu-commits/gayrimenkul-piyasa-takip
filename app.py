@@ -36,7 +36,7 @@ app = Flask(__name__)
 #   Bu nedenle Actor ilçe bazında çalışır. Mahalle doğrulaması çıktıdan yapılır.
 # =========================================================
 
-VERSION = "v3.7-table-and-auto-results"
+VERSION = "v3.8-neighborhood-direct"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -141,7 +141,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 APIFY_API_TOKEN = os.environ.get("APIFY_API_TOKEN", "").strip()
 APIFY_TIMEOUT = int(os.environ.get("APIFY_TIMEOUT", "300") or 300)
 
-ACTOR_ID = "clearpath~sahibinden-real-estate"
+ACTOR_ID = "clearpath~sahibinden-scraper-pro"
 
 def env_int(name, default):
     try:
@@ -155,7 +155,7 @@ def env_float(name, default):
     except Exception:
         return default
 
-LIVE_DISTRICT_MAX_RESULTS = max(1, min(env_int("PAS_SYNC_MAX_RESULTS", 50), 500))
+LIVE_NEIGHBORHOOD_MAX_RESULTS = max(1, min(env_int("PAS_SYNC_MAX_RESULTS", 50), 500))
 SYNC_MAX_CHARGE_USD = max(0.10, min(env_float("PAS_SYNC_MAX_CHARGE_USD", 0.75), 10.0))
 
 
@@ -221,6 +221,14 @@ def slug(value):
         text = text.replace(a, b)
 
     return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+
+
+def sahibinden_neighborhood_url(district, neighborhood):
+    """Seçili mahalleye doğrudan Sahibinden satılık daire arama URL'si."""
+    return (
+        "https://www.sahibinden.com/satilik-daire/"
+        f"istanbul-{slug(district)}-{slug(neighborhood)}"
+    )
 
 
 @dataclass
@@ -487,10 +495,10 @@ def load_listings_from_db(filters):
 
 
 # =========================================================
-# Apify — Real Estate Actor
+# Apify — Search Scraper Pro / doğrudan mahalle araması
 # =========================================================
 
-class RealEstateApifyProvider:
+class NeighborhoodApifyProvider:
     def __init__(self):
         self.api_token = APIFY_API_TOKEN
         self.actor_id = ACTOR_ID
@@ -515,22 +523,50 @@ class RealEstateApifyProvider:
         except json.JSONDecodeError as exc:
             raise RuntimeError("Apify geçerli JSON döndürmedi.") from exc
 
-    def run_district(self, district, max_results=None):
+    @staticmethod
+    def _pick(mapping, *keys):
+        if not isinstance(mapping, dict):
+            return None
+        for key in keys:
+            value = mapping.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    @staticmethod
+    def _coded_attribute(item, code):
+        """Search-summary çıktısındaki aXX kodlu alanı okur."""
+        if not isinstance(item, dict):
+            return None
+
+        containers = [item]
+        raw = item.get("rawSummary")
+        if isinstance(raw, dict):
+            containers.append(raw)
+
+        for container in containers:
+            for bucket_name in ("searchAttributes", "attributes", "summaryAttributes"):
+                bucket = container.get(bucket_name)
+                if isinstance(bucket, dict) and bucket.get(code) not in (None, ""):
+                    return bucket.get(code)
+
+        return None
+
+    def run_neighborhood(self, district, neighborhood, max_results=None):
         if not self.configured():
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
-        limit = max(1, min(int(max_results or LIVE_DISTRICT_MAX_RESULTS), 500))
+        limit = max(1, min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), 5000))
+        start_url = sahibinden_neighborhood_url(district, neighborhood)
 
+        # Maliyet güvenliği:
+        # - URL doğrudan seçili mahalleye gider.
+        # - enrichment kapalıdır: telefon/detay ek ücreti yoktur.
+        # - maxResults yalnızca bu mahallenin sonuçlarına uygulanır.
         actor_input = {
-            "listingType": "Sale",
-            "propertyCategory": "Residential",
-            "propertyType": ["Apartment"],
-            "city": "Istanbul",
-            "district": [district],
-            "sortBy": "Newest",
-            "extractPhoneNumbers": False,
+            "startUrls": [start_url],
+            "enrichment": False,
             "maxResults": limit,
-            "currency": "TRY",
         }
 
         params = {
@@ -563,116 +599,185 @@ class RealEstateApifyProvider:
         payload = self._request_json(req)
 
         if isinstance(payload, list):
-            return payload, actor_input
+            return payload, actor_input, start_url
         if isinstance(payload, dict):
-            return (
-                payload.get("items")
-                or payload.get("data")
-                or payload.get("results")
-                or []
-            ), actor_input
-        return [], actor_input
+            rows = payload.get("items") or payload.get("data") or payload.get("results") or []
+            return (rows if isinstance(rows, list) else []), actor_input, start_url
 
-    def normalize_item(self, item):
+        return [], actor_input, start_url
+
+    def normalize_item(self, item, fallback_district, fallback_neighborhood):
         if not isinstance(item, dict):
             return None
 
-        listing_id = str(item.get("id") or item.get("listingId") or "").strip()
-        url = str(item.get("url") or item.get("listingUrl") or "").strip()
+        raw = item.get("rawSummary") if isinstance(item.get("rawSummary"), dict) else {}
 
-        if not listing_id and url:
-            m = re.search(r"(\d{8,})", url)
-            if m:
-                listing_id = m.group(1)
+        listing_id = str(
+            self._pick(item, "id", "listingId", "adId", "classifiedId")
+            or self._pick(raw, "id", "listingId", "adId", "classifiedId")
+            or ""
+        ).strip()
 
-        price = parse_int(item.get("price") or item.get("formattedPrice"))
+        listing_url = str(
+            self._pick(item, "url", "listingUrl", "href", "sourceUrl")
+            or self._pick(raw, "url", "listingUrl", "href", "sourceUrl")
+            or ""
+        ).strip()
+
+        if listing_url.startswith("/"):
+            listing_url = "https://www.sahibinden.com" + listing_url
+
+        if not listing_id and listing_url:
+            match = re.search(r"(\d{8,})", listing_url)
+            if match:
+                listing_id = match.group(1)
+
+        price = parse_int(
+            self._pick(item, "price", "formattedPrice", "salePrice", "amount", "priceValue")
+            or self._pick(raw, "price", "formattedPrice", "salePrice", "amount", "priceValue")
+        )
+
         if not listing_id or price is None:
             return None
 
-        city = normalize_place(item.get("city"))
-        district = normalize_place(item.get("district"))
+        title = str(
+            self._pick(item, "title", "listingTitle", "adTitle")
+            or self._pick(raw, "title", "listingTitle", "adTitle")
+            or "İlan"
+        ).strip()
 
-        quarter = normalize_place(item.get("quarter"))
-        neighborhood = normalize_place(item.get("neighborhood"))
-        effective_neighborhood = quarter or neighborhood
+        city = normalize_place(
+            self._pick(item, "city", "cityName")
+            or self._pick(raw, "city", "cityName")
+            or "İstanbul"
+        )
 
-        # Mahalle bilgisi yoksa yanlış mahalleye yazmıyoruz.
-        if not effective_neighborhood:
-            return None
+        district = normalize_place(
+            self._pick(item, "district", "districtName", "town", "ilce")
+            or self._pick(raw, "district", "districtName", "town", "ilce")
+            or fallback_district
+        )
 
-        rooms = str(item.get("rooms") or item.get("roomCount") or "").strip()
-        gross_m2 = parse_int(item.get("grossSize") or item.get("grossM2"))
-        net_m2 = parse_int(item.get("netSize") or item.get("netM2"))
-        building_age = parse_int(item.get("buildingAge"))
+        quarter = normalize_place(
+            self._pick(item, "quarter", "quarterName")
+            or self._pick(raw, "quarter", "quarterName")
+            or ""
+        )
 
-        listed_at = str(item.get("listedAt") or item.get("listingDate") or "").strip()
+        actor_neighborhood = normalize_place(
+            self._pick(item, "neighborhood", "neighborhoodName", "mahalle")
+            or self._pick(raw, "neighborhood", "neighborhoodName", "mahalle")
+            or ""
+        )
+
+        neighborhood = quarter or actor_neighborhood or fallback_neighborhood
+
+        # Search Scraper Pro searchSummary'de daha önce doğruladığımız alanlar:
+        # a24 = brüt m², a107889 = net m², a20 = oda, a812 = bina yaşı.
+        gross_m2 = parse_int(
+            self._pick(item, "grossSize", "grossM2", "gross_m2", "areaGross", "size", "m2")
+            or self._pick(raw, "grossSize", "grossM2", "gross_m2", "areaGross", "size", "m2")
+            or self._coded_attribute(item, "a24")
+        )
+
+        net_m2 = parse_int(
+            self._pick(item, "netSize", "netM2", "net_m2", "areaNet")
+            or self._pick(raw, "netSize", "netM2", "net_m2", "areaNet")
+            or self._coded_attribute(item, "a107889")
+        )
+
+        if gross_m2 and net_m2 and net_m2 > gross_m2:
+            net_m2 = None
+
+        rooms = str(
+            self._pick(item, "rooms", "roomCount", "room", "roomInfo")
+            or self._pick(raw, "rooms", "roomCount", "room", "roomInfo")
+            or self._coded_attribute(item, "a20")
+            or ""
+        ).strip()
+
+        building_age = parse_int(
+            self._pick(item, "buildingAge", "building_age", "buildingAgeYears", "ageOfBuilding")
+            or self._pick(raw, "buildingAge", "building_age", "buildingAgeYears", "ageOfBuilding")
+            or self._coded_attribute(item, "a812")
+        )
+
+        listed_at = str(
+            self._pick(item, "listingDate", "listedAt", "createdAt", "date", "dateCreated")
+            or self._pick(raw, "listingDate", "listedAt", "createdAt", "date", "dateCreated")
+            or ""
+        ).strip()
         listing_date = listed_at[:10] if listed_at else ""
 
         listing = Listing(
             id=listing_id,
             district=district,
-            neighborhood=effective_neighborhood,
-            title=str(item.get("title") or "İlan").strip(),
+            neighborhood=neighborhood,
+            title=title,
             price=price,
             gross_m2=gross_m2,
             net_m2=net_m2,
             rooms=rooms,
             listing_date=listing_date,
             building_age=building_age,
-            source="sahibinden-real-estate",
+            source="sahibinden-scraper-pro",
         )
 
-        listing._listing_url = url
+        listing._listing_url = listing_url
         listing._city = city
         return listing
 
-    def sync_district(self, district, max_results=None):
-        raw_items, actor_input = self.run_district(district, max_results=max_results)
+    def sync_neighborhood(self, district, neighborhood, max_results=None):
+        raw_items, actor_input, start_url = self.run_neighborhood(
+            district,
+            neighborhood,
+            max_results=max_results,
+        )
 
         accepted = []
-        rejected = {"parse": 0, "wrong_city": 0, "wrong_district": 0, "no_neighborhood": 0}
-        neighborhoods_seen = {}
+        rejected = {
+            "parse": 0,
+            "wrong_city": 0,
+            "wrong_district": 0,
+            "wrong_neighborhood": 0,
+        }
+        seen = set()
 
         for raw in raw_items:
-            if not isinstance(raw, dict):
+            item = self.normalize_item(raw, district, neighborhood)
+
+            if not item:
                 rejected["parse"] += 1
                 continue
 
-            raw_city = normalize_place(raw.get("city"))
-            raw_district = normalize_place(raw.get("district"))
-            raw_quarter = normalize_place(raw.get("quarter"))
-            raw_neighborhood = normalize_place(raw.get("neighborhood"))
-
-            item = self.normalize_item(raw)
-            if not item:
-                if not (raw_quarter or raw_neighborhood):
-                    rejected["no_neighborhood"] += 1
-                else:
-                    rejected["parse"] += 1
-                continue
-
-            if slug(raw_city) != "istanbul":
+            if slug(getattr(item, "_city", "")) != "istanbul":
                 rejected["wrong_city"] += 1
                 continue
 
-            if slug(raw_district) != slug(district):
+            if slug(item.district) != slug(district):
                 rejected["wrong_district"] += 1
                 continue
 
+            if slug(item.neighborhood) != slug(neighborhood):
+                rejected["wrong_neighborhood"] += 1
+                continue
+
+            if item.id in seen:
+                continue
+
+            seen.add(item.id)
             accepted.append(item)
-            key = item.neighborhood or "(boş)"
-            neighborhoods_seen[key] = neighborhoods_seen.get(key, 0) + 1
 
         return {
             "raw_count": len(raw_items),
             "accepted": accepted,
             "rejected": rejected,
             "actor_input": actor_input,
-            "neighborhoods_seen": neighborhoods_seen,
+            "start_url": start_url,
         }
 
 
-APIFY = RealEstateApifyProvider()
+APIFY = NeighborhoodApifyProvider()
 
 try:
     init_db()
@@ -690,8 +795,8 @@ def analyze(listings):
             "count": 0,
             "median_price": None,
             "avg_price": None,
-            "median_gross_m2_price": None,
-            "median_net_m2_price": None,
+            "avg_gross_m2_price": None,
+            "avg_net_m2_price": None,
             "avg_building_age": None,
             "by_neighborhood": [],
         }
@@ -723,8 +828,8 @@ def analyze(listings):
         "count": len(listings),
         "median_price": round(statistics.median(prices)) if prices else None,
         "avg_price": round(statistics.mean(prices)) if prices else None,
-        "median_gross_m2_price": round(statistics.median(gross)) if gross else None,
-        "median_net_m2_price": round(statistics.median(net)) if net else None,
+        "avg_gross_m2_price": round(statistics.mean(gross)) if gross else None,
+        "avg_net_m2_price": round(statistics.mean(net)) if net else None,
         "avg_building_age": round(statistics.mean(ages), 1) if ages else None,
         "by_neighborhood": by_neighborhood,
     }
@@ -828,10 +933,10 @@ th,td{padding:10px 8px;border-bottom:1px solid #eceff3;text-align:left;white-spa
 <div class="subtitle">Piyasa Arama Sistemi <span class="small">{{ version }}</span></div>
 
 <div class="card">
-<div class="notice"><strong>Veri sağlayıcı:</strong> PostgreSQL + Real Estate Actor.
+<div class="notice"><strong>Veri sağlayıcı:</strong> PostgreSQL + Search Scraper Pro.
 Normal analiz Apify çalıştırmaz.
-Canlı güncelleme seçili ilçeden en fazla {{ live_limit }} ilan çeker; telefon verisi çekmez.
-Gelen ilanlar gerçek mahalle bilgileriyle PostgreSQL'e kaydedilir.
+Canlı güncelleme doğrudan seçili mahallenin Sahibinden arama URL'sinden en fazla {{ live_limit }} ilan çeker.
+Başka mahalleler taranmadığı için ücret yalnız hedef mahalleden dönen sonuçlara göre oluşur.
 Tek run güvenlik tavanı: ${{ charge_cap }}.</div>
 </div>
 
@@ -904,10 +1009,10 @@ Tek run güvenlik tavanı: ${{ charge_cap }}.</div>
 </select>
 
 <button class="primary" id="searchButton" type="submit">Kayıtlı İlanları Analiz Et</button>
-<button class="secondary" id="syncButton" type="button">Seçili İlçeyi Güncelle (Apify)</button>
+<button class="secondary" id="syncButton" type="button">Seçili Mahalleyi Güncelle (Apify)</button>
 
 <div class="small" style="margin-top:10px">
-Öneri: Önce bir ilçe + mahalle seçin. Güncelleme ilçe bazında veri getirir; seçtiğiniz mahalleye ait bulunan kayıt sayısı ayrıca raporlanır.
+Güncelleme doğrudan seçili mahallenin Sahibinden arama URL'sine gider. Örneğin 3 sonuç varsa 50 farklı Kadıköy ilanı taranmaz.
 </div>
 </div>
 </form>
@@ -921,8 +1026,8 @@ Tek run güvenlik tavanı: ${{ charge_cap }}.</div>
 <div class="metric"><div class="k">İlan sayısı</div><div class="v" id="mCount">-</div></div>
 <div class="metric"><div class="k">Medyan fiyat</div><div class="v" id="mMedianPrice">-</div></div>
 <div class="metric"><div class="k">Ort. fiyat</div><div class="v" id="mAvgPrice">-</div></div>
-<div class="metric"><div class="k">Medyan brüt TL/m²</div><div class="v" id="mMedianM2">-</div></div>
-<div class="metric"><div class="k">Medyan net TL/m²</div><div class="v" id="mMedianNetM2">-</div></div>
+<div class="metric"><div class="k">Ortalama brüt TL/m²</div><div class="v" id="mMedianM2">-</div></div>
+<div class="metric"><div class="k">Ortalama net TL/m²</div><div class="v" id="mMedianNetM2">-</div></div>
 <div class="metric"><div class="k">Ort. bina yaşı</div><div class="v" id="mAvgAge">-</div></div>
 </div>
 
@@ -932,7 +1037,7 @@ Tek run güvenlik tavanı: ${{ charge_cap }}.</div>
 <thead>
 <tr>
 <th>Mahalle</th><th>Oda</th><th>Yaş</th><th>Brüt</th><th>Net</th>
-<th>Fiyat</th><th>Brüt TL/m²</th><th>Net TL/m²</th><th>PAS</th><th>İlan ID</th><th>İlan Tarihi</th>
+<th>Fiyat</th><th>Brüt TL/m²</th><th>Net TL/m²</th><th>PAS</th><th>İlan Tarihi</th><th>İlan ID</th>
 </tr>
 </thead>
 <tbody id="listingRows"></tbody>
@@ -1069,8 +1174,8 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
   document.getElementById("mCount").textContent=data.analysis.count;
   document.getElementById("mMedianPrice").textContent=money(data.analysis.median_price);
   document.getElementById("mAvgPrice").textContent=money(data.analysis.avg_price);
-  document.getElementById("mMedianM2").textContent=money(data.analysis.median_gross_m2_price);
-  document.getElementById("mMedianNetM2").textContent=money(data.analysis.median_net_m2_price);
+  document.getElementById("mMedianM2").textContent=money(data.analysis.avg_gross_m2_price);
+  document.getElementById("mMedianNetM2").textContent=money(data.analysis.avg_net_m2_price);
   document.getElementById("mAvgAge").textContent=data.analysis.avg_building_age==null?"-":data.analysis.avg_building_age+" yıl";
 
   document.getElementById("listingRows").innerHTML=data.listings.map(r=>`
@@ -1082,8 +1187,8 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
      <td>${money(r.gross_price_m2)}</td>
      <td>${money(r.net_price_m2)}</td>
      <td>${r.opportunity_score??"-"} <span class="small">${esc(r.opportunity_label||"")}</span></td>
-     <td>${esc(r.id||"-")}</td>
      <td>${esc(r.listing_date||"-")}</td>
+     <td>${esc(r.id||"-")}</td>
     </tr>`).join("");
 
   document.querySelectorAll(".listing-clickable").forEach(tr=>{
@@ -1100,18 +1205,16 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
 
  const [district,neighborhood]=pairs[0];
  const button=document.getElementById("syncButton"), oldText=button.textContent;
- button.disabled=true; button.textContent="İlçe verileri çekiliyor…";
+ button.disabled=true; button.textContent="Mahalle ilanları çekiliyor…";
 
  try{
   const result=await postJson("/api/sync",{district,neighborhood}), data=result.data;
   if(!result.ok||!data.ok)throw new Error(data.error||("Güncelleme başarısız. HTTP "+result.status));
 
-  const top = (data.neighborhoods_seen||[]).slice(0,8).map(x=>`${x.name}: ${x.count}`).join(", ");
   showSuccess(
-   `${district}: Actor ${data.raw_received} ham ilan döndürdü; ${data.accepted} ilan kaydedilebilir bulundu. `+
-   `${data.new} yeni, ${data.updated} güncellendi. `+
-   `${neighborhood} için PostgreSQL'de ${data.selected_neighborhood_count} ilan var.`+
-   (top?`\nBu çekimde görülen mahalleler: ${top}`:"")
+   `${district} · ${neighborhood}: doğrudan mahalle aramasından ${data.raw_received} ilan geldi; `+
+   `${data.accepted} ilan kabul edildi. ${data.new} yeni, ${data.updated} güncellendi. `+
+   `PostgreSQL'de bu mahalle için toplam ${data.selected_neighborhood_count} ilan var.`
   );
 
   // Güncelleme başarılı olunca aynı seçim ve filtrelerle
@@ -1164,7 +1267,7 @@ def home():
         districts_json=json.dumps(DISTRICTS, ensure_ascii=False),
         neighborhoods_json=json.dumps(NEIGHBORHOODS, ensure_ascii=False),
         version=VERSION,
-        live_limit=LIVE_DISTRICT_MAX_RESULTS,
+        live_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
         charge_cap=f"{SYNC_MAX_CHARGE_USD:.2f}",
     )
 
@@ -1226,23 +1329,28 @@ def api_sync():
     try:
         district, neighborhood = validate_pair(payload)
 
-        result = APIFY.sync_district(district, max_results=LIVE_DISTRICT_MAX_RESULTS)
+        result = APIFY.sync_neighborhood(
+            district,
+            neighborhood,
+            max_results=LIVE_NEIGHBORHOOD_MAX_RESULTS,
+        )
         accepted = result["accepted"]
 
-        # Bu mesaj "mahallede ilan yok" demez; sadece Actor çıktısını raporlar.
         if not accepted:
             message = (
-                f"{district} için Actor {result['raw_count']} ham sonuç döndürdü fakat "
-                "İstanbul / doğru ilçe / mahalle bilgisi doğrulanabilen kayıt oluşmadı. "
-                "Bu, Sahibinden'de ilan olmadığı anlamına GELMEZ; Actor çıktısı doğrulanamadı."
+                f"{district} / {neighborhood} için doğrudan mahalle araması "
+                f"{result['raw_count']} ham sonuç döndürdü fakat kaydedilebilir ilan oluşmadı. "
+                "PostgreSQL kayıtları etkilenmedi."
             )
             record_sync_state(district, neighborhood, 0, message)
+
             return jsonify(
                 ok=False,
                 error=message,
                 raw_received=result["raw_count"],
                 rejected=result["rejected"],
                 actor_input=result["actor_input"],
+                start_url=result["start_url"],
             ), 409
 
         saved = save_listings_to_db(accepted)
@@ -1252,11 +1360,6 @@ def api_sync():
             "neighborhoods": {district: [neighborhood]},
         }
         selected_count = len(load_listings_from_db(selected_filters))
-
-        seen_sorted = sorted(
-            [{"name": k, "count": v} for k, v in result["neighborhoods_seen"].items()],
-            key=lambda x: (-x["count"], x["name"])
-        )
 
         record_sync_state(district, neighborhood, selected_count, "")
 
@@ -1268,14 +1371,15 @@ def api_sync():
             accepted=len(accepted),
             rejected=result["rejected"],
             selected_neighborhood_count=selected_count,
-            neighborhoods_seen=seen_sorted,
             actor_input=result["actor_input"],
-            sync_limit=LIVE_DISTRICT_MAX_RESULTS,
+            start_url=result["start_url"],
+            sync_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
             **saved,
         )
 
     except ValueError as exc:
         return jsonify(ok=False, error=str(exc)), 400
+
     except Exception as exc:
         try:
             record_sync_state(
@@ -1289,7 +1393,7 @@ def api_sync():
 
         return jsonify(
             ok=False,
-            error=f"Real Estate ilçe güncellemesi yapılamadı: {exc}. PostgreSQL kayıtları etkilenmedi.",
+            error=f"Mahalle güncellemesi yapılamadı: {exc}. PostgreSQL kayıtları etkilenmedi.",
         ), 502
 
 
@@ -1301,10 +1405,11 @@ def api_provider_status():
         database_configured=db_configured(),
         apify_configured=APIFY.configured(),
         actor_id=ACTOR_ID,
-        max_results=LIVE_DISTRICT_MAX_RESULTS,
-        extract_phone_numbers=False,
+        max_results=LIVE_NEIGHBORHOOD_MAX_RESULTS,
+        enrichment=False,
         max_total_charge_usd=SYNC_MAX_CHARGE_USD,
         normal_search_uses_apify=False,
+        neighborhood_direct_url=True,
     )
 
 
