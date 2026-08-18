@@ -14,7 +14,7 @@ from psycopg.rows import dict_row
 app = Flask(__name__)
 
 # =========================================================
-# HLF PAS v3.5 — Çalışan Real Estate akışına dönüş
+# HLF PAS v3.6 — Çalışan Real Estate akışına dönüş
 #
 # Amaç:
 #   1) Normal analiz = sadece PostgreSQL (Apify maliyeti yok)
@@ -36,7 +36,7 @@ app = Flask(__name__)
 #   Bu nedenle Actor ilçe bazında çalışır. Mahalle doğrulaması çıktıdan yapılır.
 # =========================================================
 
-VERSION = "v3.5-realestate-restored"
+VERSION = "v3.6-turkish-location-fix"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -201,9 +201,25 @@ def normalize_place(value):
 
 
 def slug(value):
-    text = normalize_place(value).casefold()
-    for a, b in {"ı":"i","ğ":"g","ü":"u","ş":"s","ö":"o","ç":"c"}.items():
+    # Türkçe yer adlarını API çıktılarıyla güvenli biçimde karşılaştır.
+    # Özellikle "İstanbul".casefold() -> "i̇stanbul" (i + combining dot)
+    # ürettiği için önce Unicode combining işaretlerini temizliyoruz.
+    import unicodedata
+
+    text = normalize_place(value).strip().casefold()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+
+    for a, b in {
+        "ı": "i",
+        "ğ": "g",
+        "ü": "u",
+        "ş": "s",
+        "ö": "o",
+        "ç": "c",
+    }.items():
         text = text.replace(a, b)
+
     return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
 
 
