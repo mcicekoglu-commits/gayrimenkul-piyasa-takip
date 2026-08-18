@@ -34,9 +34,9 @@ app = Flask(__name__)
 #   APIFY_TIMEOUT=300                              (opsiyonel)
 # Actor kod içinde sabit: clearpath~sahibinden-scraper-pro
 # DATABASE_URL Railway PostgreSQL bağlantısıdır.
-# PAS_SYNC_MAX_RESULTS=10 (öneri; kod en fazla 20 izin verir)
-#   PAS_SYNC_ENRICHMENT=false (öneri; summary-only düşük maliyet)
-#   PAS_SYNC_MAX_CHARGE_USD=0.25 (tek run için sert maliyet tavanı)
+# PAS_SYNC_MAX_RESULTS artık kullanılmıyor; test limiti kodda sabit 1
+#   PAS_SYNC_ENRICHMENT artık kullanılmıyor; enrichment kodda sabit false
+#   Tek run maliyet tavanı kodda sabit 0.10 USD
 # =========================================================
 
 DISTRICTS = [
@@ -819,23 +819,16 @@ class AuthorizedSahibindenProvider(ListingProvider):
 
 class ApifyListingProvider(ListingProvider):
     """
-    HLF PAS güncelleme sağlayıcısı.
+    HLF PAS güvenli canlı güncelleme sağlayıcısı.
 
-    Actor:
-      clearpath~sahibinden-scraper-pro
+    TEST MODU:
+      - Actor input maxResults = 1
+      - enrichment = False
+      - Apify API maxItems = 1
+      - maxTotalChargeUsd = 0.10 USD
 
-    Maliyet/Test modu:
-      enrichment=True
-      includeDetails=False
-      extractPhoneNumbers=False
-      maxResults<=3
-
-    Böylece yalnızca base/search-summary çıktısı kullanılır.
-    Telefon ve enriched-detail add-on çağrılmaz.
-
-    Normal PAS filtrelemesi Actor'ı çalıştırmaz.
-    Actor yalnızca /api/sync ile, kullanıcının açıkça
-    "Yeni ilanları güncelle" demesi halinde çalışır.
+    Normal PAS araması Apify kullanmaz.
+    Yanlış il / ilçe / mahalle dönen sonuçlar PostgreSQL'e yazılmaz.
     """
 
     name = "apify_sync"
@@ -844,19 +837,11 @@ class ApifyListingProvider(ListingProvider):
     def __init__(self):
         self.api_token = os.environ.get("APIFY_API_TOKEN", "").strip()
         self.actor_id = self.ACTOR_ID
-        # TEST MODU: Sistem oturana kadar her güncellemede en fazla 3 ilan.
-        # Daha sonra bu üst sınırı artırabiliriz.
-        self.max_results = parse_int(
-            os.environ.get("PAS_SYNC_MAX_RESULTS", "10")
-        ) or 3
-        self.max_results = max(1, min(self.max_results, 20))
+        self.max_results = 1
+        self.enrichment = False
         self.timeout = parse_int(os.environ.get("APIFY_TIMEOUT", "300")) or 300
-        self.enrichment = str(os.environ.get("PAS_SYNC_ENRICHMENT", "false")).strip().lower() in {"1", "true", "yes", "on"}
-        try:
-            self.max_charge_usd = float(os.environ.get("PAS_SYNC_MAX_CHARGE_USD", "0.25"))
-        except ValueError:
-            self.max_charge_usd = 0.25
-        self.max_charge_usd = max(0.05, min(self.max_charge_usd, 2.0))
+        self.timeout = max(30, min(self.timeout, 300))
+        self.max_charge_usd = 0.10
 
     def configured(self):
         return bool(self.api_token)
@@ -864,28 +849,25 @@ class ApifyListingProvider(ListingProvider):
     def _run_actor(self, actor_input):
         params = {
             "clean": "true",
-            "limit": str(self.max_results),
-            # Apify-level hard guards. maxItems limits chargeable dataset items
-            # for pay-per-result Actors; maxTotalChargeUsd caps the entire run.
-            "maxItems": str(self.max_results),
+            "format": "json",
+            "limit": "1",
+            "maxItems": "1",
             "maxTotalChargeUsd": f"{self.max_charge_usd:.2f}",
-            "timeout": str(min(self.timeout, 300)),
+            "timeout": str(self.timeout),
         }
         url = (
             f"https://api.apify.com/v2/acts/{self.actor_id}"
             "/run-sync-get-dataset-items?" + urlencode(params)
         )
 
-        body = json.dumps(actor_input, ensure_ascii=False).encode("utf-8")
-
         req = Request(
             url,
-            data=body,
+            data=json.dumps(actor_input, ensure_ascii=False).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self.api_token}",
-                "User-Agent": "HLF-PAS/2.1",
+                "User-Agent": "HLF-PAS/3.2-safe1",
             },
             method="POST",
         )
@@ -893,34 +875,23 @@ class ApifyListingProvider(ListingProvider):
         try:
             with urlopen(req, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-
-            if isinstance(payload, list):
-                return payload
-            if isinstance(payload, dict):
-                return (
-                    payload.get("items")
-                    or payload.get("data")
-                    or payload.get("results")
-                    or []
-                )
-            return []
-
         except HTTPError as exc:
             try:
                 detail = exc.read().decode("utf-8", errors="ignore")[:1200]
             except Exception:
                 detail = ""
-            raise RuntimeError(
-                f"Apify HTTP hatası: {exc.code}. {detail}"
-            ) from exc
+            raise RuntimeError(f"Apify HTTP hatası: {exc.code}. {detail}") from exc
         except URLError as exc:
-            raise RuntimeError(
-                f"Apify bağlantı hatası: {exc.reason}"
-            ) from exc
+            raise RuntimeError(f"Apify bağlantı hatası: {exc.reason}") from exc
         except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "Apify geçerli JSON döndürmedi."
-            ) from exc
+            raise RuntimeError("Apify geçerli JSON döndürmedi.") from exc
+
+        if isinstance(payload, list):
+            return payload[:1]
+        if isinstance(payload, dict):
+            rows = payload.get("items") or payload.get("data") or payload.get("results") or []
+            return rows[:1] if isinstance(rows, list) else []
+        return []
 
     @staticmethod
     def _pick(mapping, *keys):
@@ -933,71 +904,25 @@ class ApifyListingProvider(ListingProvider):
         return None
 
     @staticmethod
-    def _norm_key(value):
-        text = str(value or "").casefold()
-        replacements = {
-            "ı": "i", "ğ": "g", "ü": "u",
-            "ş": "s", "ö": "o", "ç": "c",
-            "²": "2",
-        }
-        for src, dst in replacements.items():
-            text = text.replace(src, dst)
-        return re.sub(r"[^a-z0-9]+", "", text)
-
-    def _attribute_value(self, item, *aliases):
-        """
-        Search-summary çıktısındaki farklı attribute şekillerinden
-        Brüt m² / Net m² / Oda Sayısı gibi alanları bulur.
-        """
-        raw = item.get("rawSummary") if isinstance(item.get("rawSummary"), dict) else {}
-
-        candidates = [
-            item.get("summaryAttributes"),
-            item.get("searchAttributes"),
-            item.get("attributes"),
-            raw.get("summaryAttributes"),
-            raw.get("searchAttributes"),
-            raw.get("attributes"),
-        ]
-
-        wanted = {self._norm_key(x) for x in aliases}
-
-        for source in candidates:
-            if isinstance(source, dict):
-                for key, value in source.items():
-                    if self._norm_key(key) in wanted and value not in (None, ""):
-                        return value
-
-            elif isinstance(source, list):
-                for row in source:
-                    if not isinstance(row, dict):
-                        continue
-                    key = (
-                        row.get("name")
-                        or row.get("label")
-                        or row.get("title")
-                        or row.get("key")
-                    )
-                    value = (
-                        row.get("value")
-                        or row.get("text")
-                        or row.get("displayValue")
-                    )
-                    if self._norm_key(key) in wanted and value not in (None, ""):
-                        return value
-
+    def _coded_attribute(item, code):
+        """Search Scraper Pro searchSummary içindeki aXX kodlu alanı okur."""
+        for bucket_name in ("searchAttributes", "attributes"):
+            bucket = item.get(bucket_name)
+            if isinstance(bucket, dict) and bucket.get(code) not in (None, ""):
+                return bucket.get(code)
+        raw = item.get("rawSummary")
+        if isinstance(raw, dict):
+            for bucket_name in ("searchAttributes", "attributes"):
+                bucket = raw.get(bucket_name)
+                if isinstance(bucket, dict) and bucket.get(code) not in (None, ""):
+                    return bucket.get(code)
         return None
 
-    def _normalize_item(self, item, fallback_district, fallback_neighborhood):
+    def _normalize_item(self, item, fallback_district=None, fallback_neighborhood=None):
+        if not isinstance(item, dict):
+            return None
+
         raw = item.get("rawSummary") if isinstance(item.get("rawSummary"), dict) else {}
-
-        location = item.get("location")
-        if not isinstance(location, dict):
-            location = {}
-
-        address_obj = item.get("address")
-        if not isinstance(address_obj, dict):
-            address_obj = {}
 
         listing_id = str(
             self._pick(item, "id", "listingId", "adId", "classifiedId")
@@ -1006,18 +931,23 @@ class ApifyListingProvider(ListingProvider):
         ).strip()
 
         listing_url = str(
-            self._pick(item, "url", "listingUrl", "href", "sourceUrl")
-            or self._pick(raw, "url", "listingUrl", "href", "sourceUrl")
+            self._pick(item, "url", "listingUrl", "href")
+            or self._pick(raw, "url", "listingUrl", "href")
             or ""
         ).strip()
-
         if listing_url.startswith("/"):
             listing_url = "https://www.sahibinden.com" + listing_url
-
         if not listing_id and listing_url:
             match = re.search(r"(\d{8,})", listing_url)
             if match:
                 listing_id = match.group(1)
+
+        price = parse_int(
+            self._pick(item, "price", "formattedPrice", "salePrice", "amount")
+            or self._pick(raw, "price", "formattedPrice", "salePrice", "amount")
+        )
+        if not listing_id or not price:
+            return None
 
         title = str(
             self._pick(item, "title", "listingTitle", "adTitle")
@@ -1025,131 +955,68 @@ class ApifyListingProvider(ListingProvider):
             or "İlan"
         ).strip()
 
-        district = normalize_place_name(
-            self._pick(item, "district", "districtName", "town", "ilce")
-            or self._pick(raw, "district", "districtName", "town", "ilce")
-            or self._pick(location, "district", "districtName", "town")
-            or self._pick(address_obj, "district", "districtName", "town")
-            or fallback_district
-        )
-
-        neighborhood = normalize_place_name(
-            self._pick(
-                item,
-                "quarter", "neighborhood", "neighborhoodName", "mahalle"
-            )
-            or self._pick(
-                raw,
-                "quarter", "neighborhood", "neighborhoodName", "mahalle"
-            )
-            or self._pick(
-                location,
-                "quarter", "neighborhood", "neighborhoodName"
-            )
-            or self._pick(
-                address_obj,
-                "quarter", "neighborhood", "neighborhoodName"
-            )
-            or fallback_neighborhood
-        )
-
-        price = parse_int(
-            self._pick(
-                item,
-                "price", "salePrice", "amount", "priceValue",
-                "formattedPrice"
-            )
-            or self._pick(
-                raw,
-                "price", "salePrice", "amount", "priceValue",
-                "formattedPrice"
-            )
-        )
-
-        gross_m2 = parse_int(
-            self._pick(
-                item,
-                "grossSize", "grossM2", "gross_m2", "grossSquareMeters",
-                "areaGross", "size", "m2", "squareMeters"
-            )
-            or self._pick(
-                raw,
-                "grossSize", "grossM2", "gross_m2", "grossSquareMeters",
-                "areaGross", "size", "m2", "squareMeters"
-            )
-            or self._attribute_value(
-                item,
-                "m² (Brüt)", "m2 (Brüt)", "Brüt m²", "Brüt m2",
-                "Brüt", "m²", "m2"
-            )
-        )
-
-        net_m2 = parse_int(
-            self._pick(
-                item,
-                "netSize", "netM2", "net_m2", "netSquareMeters", "areaNet"
-            )
-            or self._pick(
-                raw,
-                "netSize", "netM2", "net_m2", "netSquareMeters", "areaNet"
-            )
-            or self._attribute_value(
-                item,
-                "m² (Net)", "m2 (Net)", "Net m²", "Net m2", "Net"
-            )
-        )
-
-        rooms_value = (
-            self._pick(item, "rooms", "roomCount", "room", "roomInfo")
-            or self._pick(raw, "rooms", "roomCount", "room", "roomInfo")
-            or self._attribute_value(
-                item,
-                "Oda Sayısı", "Oda", "Oda Sayisi", "roomCount", "rooms"
-            )
+        # Gerçek 18:05 run çıktısında konum alanları top-level geldi:
+        # city / district / neighborhood / quarter / address.
+        city = normalize_place_name(
+            self._pick(item, "city", "cityName")
+            or self._pick(raw, "city", "cityName")
             or ""
         )
-        rooms = str(rooms_value).strip()
+        district = normalize_place_name(
+            self._pick(item, "district", "districtName", "town")
+            or self._pick(raw, "district", "districtName", "town")
+            or ""
+        )
+        quarter = normalize_place_name(
+            self._pick(item, "quarter", "quarterName")
+            or self._pick(raw, "quarter", "quarterName")
+            or ""
+        )
+        actor_neighborhood = normalize_place_name(
+            self._pick(item, "neighborhood", "neighborhoodName")
+            or self._pick(raw, "neighborhood", "neighborhoodName")
+            or ""
+        )
+
+        # Sahibinden search-summary'de gerçek mahalle "quarter" alanında.
+        neighborhood = quarter or actor_neighborhood
+
+        # 18:26'da görülen gerçek searchSummary kodları:
+        # a24 = brüt m², a107889 = net m², a20 = oda sayısı,
+        # a812 = bina yaşı (örn. "0 (Yapım Aşamasında)").
+        gross_m2 = parse_int(
+            self._pick(item, "grossSize", "grossM2", "gross_m2", "areaGross")
+            or self._coded_attribute(item, "a24")
+        )
+        net_m2 = parse_int(
+            self._pick(item, "netSize", "netM2", "net_m2", "areaNet")
+            or self._coded_attribute(item, "a107889")
+        )
+        if gross_m2 and net_m2 and net_m2 > gross_m2:
+            net_m2 = None
+
+        rooms = str(
+            self._pick(item, "rooms", "roomCount", "room")
+            or self._coded_attribute(item, "a20")
+            or ""
+        ).strip()
 
         building_age = parse_int(
-            self._pick(
-                item,
-                "buildingAge", "building_age", "buildingAgeYears",
-                "ageOfBuilding", "buildingYearAge"
-            )
-            or self._pick(
-                raw,
-                "buildingAge", "building_age", "buildingAgeYears",
-                "ageOfBuilding", "buildingYearAge"
-            )
-            or self._attribute_value(
-                item,
-                "Bina Yaşı", "Bina Yasi", "Bina Yaşı (Yıl)",
-                "Bina Yaşı (Yil)", "buildingAge", "Building Age"
-            )
+            self._pick(item, "buildingAge", "building_age")
+            or self._coded_attribute(item, "a812")
         )
 
         listed_at = str(
-            self._pick(
-                item,
-                "listedAt", "listingDate", "createdAt", "date", "dateCreated"
-            )
-            or self._pick(
-                raw,
-                "listedAt", "listingDate", "createdAt", "date", "dateCreated"
-            )
+            self._pick(item, "listingDate", "listedAt", "createdAt", "date")
+            or self._pick(raw, "listingDate", "listedAt", "createdAt", "date")
             or ""
         ).strip()
         listing_date = listed_at[:10] if listed_at else ""
 
-        # Bir ilanı kaydetmek için kimlik ve fiyat temel olarak yeterlidir.
-        # İlçe/mahalle, seçilen hedef mahalleden fallback edilir.
-        if not listing_id or not price:
-            return None
-
         listing = Listing(
             id=listing_id,
-            district=district or fallback_district,
-            neighborhood=neighborhood or fallback_neighborhood,
+            district=district,
+            neighborhood=neighborhood,
             title=title,
             price=price,
             gross_m2=gross_m2,
@@ -1160,61 +1027,67 @@ class ApifyListingProvider(ListingProvider):
             source="sahibinden-scraper-pro",
         )
         listing._listing_url = listing_url
+        listing._city = city
+        listing._actor_neighborhood = actor_neighborhood
+        listing._quarter = quarter
+        listing._address = str(self._pick(item, "address") or "")
+        listing._source_url = str(self._pick(item, "sourceUrl") or "")
+        listing._record_type = str(self._pick(item, "recordType") or "")
         return listing
+
+    @staticmethod
+    def _location_is_target(listing, district, neighborhood):
+        return (
+            sahibinden_slug(getattr(listing, "_city", "")) == "istanbul"
+            and sahibinden_slug(listing.district) == sahibinden_slug(district)
+            and sahibinden_slug(listing.neighborhood) == sahibinden_slug(neighborhood)
+        )
+
+    @staticmethod
+    def _location_text(listing):
+        parts = [
+            getattr(listing, "_city", ""),
+            listing.district,
+            getattr(listing, "_quarter", "") or listing.neighborhood,
+        ]
+        return " / ".join(str(x) for x in parts if x) or "konum okunamadı"
 
     def sync_neighborhood(self, district, neighborhood):
         if not self.configured():
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
         start_url = sahibinden_search_url(district, neighborhood)
-        print(f"HLF PAS Apify sync URL: {start_url}", flush=True)
+        print(f"HLF PAS Apify TEST URL: {start_url}", flush=True)
 
-        # Search Scraper Pro maliyet güvenliği:
-        # Güncel input şemasında `enrichment` varsayılan TRUE olduğundan
-        # burada açıkça FALSE gönderiyoruz.
         actor_input = {
             "startUrls": [start_url],
-            # Summary-only is the default cost mode. Turn on only if the
-            # extra detail fields are worth the extra per-listing charge.
-            "enrichment": self.enrichment,
-            "maxResults": self.max_results,
+            "enrichment": False,
+            "maxResults": 1,
         }
 
         raw_items = self._run_actor(actor_input)
         print(f"HLF PAS Apify raw result count: {len(raw_items)}", flush=True)
 
-        listings = []
-        seen_ids = set()
+        if not raw_items:
+            return []
 
-        for item in raw_items:
-            if not isinstance(item, dict):
-                continue
-
-            normalized = self._normalize_item(
-                item,
-                fallback_district=district,
-                fallback_neighborhood=neighborhood,
+        normalized = self._normalize_item(raw_items[0], district, neighborhood)
+        if not normalized:
+            raise RuntimeError(
+                "Apify 1 ham sonuç üretti fakat ilan kimliği/fiyatı okunamadı. "
+                "Kayıt yapılmadı. Aynı testi tekrar çalıştırmayın."
             )
-            if not normalized:
-                continue
 
-            # Actor gerçek konum döndürdüyse yanlış mahalleyi kabul etme.
-            # Konum yoksa hedef mahalle fallback edildiği için kayıt korunur.
-            actual_district = sahibinden_slug(normalized.district)
-            actual_neighborhood = sahibinden_slug(normalized.neighborhood)
+        if not self._location_is_target(normalized, district, neighborhood):
+            raise RuntimeError(
+                "Apify 1 sonuç üretti fakat YANLIŞ KONUM döndürdü. "
+                f"Hedef: İstanbul / {district} / {neighborhood}. "
+                f"Dönen: {self._location_text(normalized)}. "
+                "Bu ilan PostgreSQL'e KAYDEDİLMEDİ. "
+                "Bu durumda aynı butona tekrar basmayın; sorun Actor tarafındaki arama sonucudur."
+            )
 
-            if actual_district and actual_district != sahibinden_slug(district):
-                continue
-            if actual_neighborhood and actual_neighborhood != sahibinden_slug(neighborhood):
-                continue
-
-            if str(normalized.id) in seen_ids:
-                continue
-
-            seen_ids.add(str(normalized.id))
-            listings.append(normalized)
-
-        return listings
+        return [normalized]
 
     def _get_json(self, url):
         req = Request(
@@ -1222,15 +1095,15 @@ class ApifyListingProvider(ListingProvider):
             headers={
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self.api_token}",
-                "User-Agent": "HLF-PAS/3.0",
+                "User-Agent": "HLF-PAS/3.2-safe1",
             },
             method="GET",
         )
         with urlopen(req, timeout=self.timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
-    def import_paid_history(self, district, neighborhood, max_items=50):
-        """Read existing successful Apify datasets. Does NOT start a new Actor run."""
+    def import_paid_history(self, district, neighborhood, max_items=100):
+        """Mevcut başarılı datasetleri okur; yeni Actor run BAŞLATMAZ."""
         if not self.configured():
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
@@ -1241,8 +1114,6 @@ class ApifyListingProvider(ListingProvider):
         payload = self._get_json(runs_url)
         runs = ((payload.get("data") or {}).get("items") or []) if isinstance(payload, dict) else []
 
-        wanted_d = sahibinden_slug(district)
-        wanted_n = sahibinden_slug(neighborhood)
         found = []
         seen = set()
 
@@ -1266,30 +1137,24 @@ class ApifyListingProvider(ListingProvider):
             if not isinstance(items, list):
                 continue
 
-            for item in items:
+            for raw_item in items:
                 if len(found) >= max_items:
                     break
-                if not isinstance(item, dict):
-                    continue
-                normalized = self._normalize_item(item, district, neighborhood)
+                normalized = self._normalize_item(raw_item, district, neighborhood)
                 if not normalized:
                     continue
-                if sahibinden_slug(normalized.district) != wanted_d:
+                if not self._location_is_target(normalized, district, neighborhood):
                     continue
-                if sahibinden_slug(normalized.neighborhood) != wanted_n:
+                if str(normalized.id) in seen:
                     continue
-                lid = str(normalized.id)
-                if lid in seen:
-                    continue
-                seen.add(lid)
+                seen.add(str(normalized.id))
                 found.append(normalized)
 
-        return found[:max_items]
+        return found
 
     def search(self, filters):
         raise RuntimeError(
-            "Apify normal aramada kullanılmıyor. "
-            "Yeni ilanlar için /api/sync kullanın."
+            "Apify normal aramada kullanılmıyor. Yeni ilanlar için /api/sync kullanın."
         )
 
 def build_provider():
@@ -1523,7 +1388,7 @@ th{font-size:12px;color:#6b7280}
 <body>
 <div class="container">
 <h1>HLF PAS</h1>
-<div class="subtitle">Piyasa Arama Sistemi <span class="small">v3.1.1</span></div>
+<div class="subtitle">Piyasa Arama Sistemi <span class="small">v3.2-safe1</span></div>
 
 <div class="card">
 <div class="notice">
@@ -1605,9 +1470,9 @@ Yeni ilanlar yalnızca "Yeni ilanları güncelle" düğmesiyle alınır.
 </select>
 
 <button class="primary" id="searchButton" type="submit">Kayıtlı İlanları Analiz Et</button>
-<button class="secondary" id="syncButton" type="button">Yeni İlanları Güncelle (Apify)</button>
+<button class="secondary" id="syncButton" type="button">Yeni İlanı Test Et (Apify · 1 İlan)</button>
 <button class="secondary" id="historyButton" type="button">Önceki Apify Verilerini İçe Aktar (Yeni Ücret Yok)</button>
-<div class="sync-note">Normal analiz PostgreSQL’den ve ücretsizdir. Canlı güncelleme seçili tek mahallede kontrollü sayıda ilan çeker. Önceki Apify verilerini içe aktarma yeni Actor run başlatmaz.</div>
+<div class="sync-note">Normal analiz PostgreSQL’den ve ücretsizdir. Canlı test seçili tek mahallede yalnızca 1 ilan çeker. Önceki Apify verilerini içe aktarma yeni Actor run başlatmaz.</div>
 </div>
 </form>
 
@@ -1895,7 +1760,7 @@ document.getElementById("syncButton").addEventListener("click",async ()=>{
  const button=document.getElementById("syncButton");
  const oldText=button.textContent;
  button.disabled=true;
- button.textContent="Yeni ilanlar kontrol ediliyor…";
+ button.textContent="1 ilan kontrol ediliyor…";
 
  try{
   const result=await postJson("/api/sync",{district,neighborhood});
@@ -2189,9 +2054,9 @@ def api_sync():
 
         if not listings:
             message = (
-                "Apify 0 sonuç döndürdü. Mevcut PostgreSQL kayıtları korunuyor. "
-                "Apify hesabındaki aylık kullanım limiti doluysa yeni sonuç üretilemez; "
-                "limit açıldığında aynı kontrollü çağrı tekrar denenebilir."
+                "Apify bu 1 ilanlık testte ham dataset sonucu üretmedi. "
+                "Mevcut PostgreSQL kayıtları korunuyor. Aynı butona tekrar basmayın; "
+                "önce Apify Run ekranı kontrol edilmeli."
             )
             record_sync_state(district, neighborhood, result_count=0, error=message)
             return jsonify({
