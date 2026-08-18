@@ -15,7 +15,7 @@ from psycopg.rows import dict_row
 app = Flask(__name__)
 
 # =========================================================
-# HLF PAS v3.3 — Real Estate Actor'a geri dönüş
+# HLF PAS v3.4 — Real Estate Actor'a geri dönüş
 #
 # Railway Variables:
 #   DATABASE_URL=...
@@ -23,7 +23,7 @@ app = Flask(__name__)
 #   APIFY_TIMEOUT=300   (opsiyonel)
 #
 # Güvenlik:
-#   - Canlı test maxResults = 1
+#   - Canlı güncelleme ilçe bazında; mahalle PostgreSQL'de filtrelenir
 #   - extractPhoneNumbers = false
 #   - API maxItems = 1
 #   - API maxTotalChargeUsd = 0.10
@@ -498,11 +498,12 @@ class RealEstateApifyProvider:
         except json.JSONDecodeError as exc:
             raise RuntimeError("Apify geçerli JSON döndürmedi.") from exc
 
-    def run_one(self, district):
+    def run_district(self, district, max_results=None):
         if not self.configured():
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
-        # Eski başarılı run'daki yapılandırılmış input'a geri dönüş.
+        limit = max(1, min(int(max_results or LIVE_DISTRICT_MAX_RESULTS), 500))
+
         actor_input = {
             "listingType": "Sale",
             "propertyCategory": "Residential",
@@ -511,15 +512,15 @@ class RealEstateApifyProvider:
             "district": [district],
             "sortBy": "Newest",
             "extractPhoneNumbers": False,
-            "maxResults": 1,
+            "maxResults": limit,
             "currency": "TRY",
         }
 
         params = {
             "clean": "true",
             "format": "json",
-            "limit": "1",
-            "maxItems": "1",
+            "limit": str(limit),
+            "maxItems": str(limit),
             "maxTotalChargeUsd": f"{SYNC_MAX_CHARGE_USD:.2f}",
             "timeout": str(self.timeout),
         }
@@ -537,7 +538,7 @@ class RealEstateApifyProvider:
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self.api_token}",
-                "User-Agent": "HLF-PAS/3.3",
+                "User-Agent": "HLF-PAS/3.4",
             },
             method="POST",
         )
@@ -636,8 +637,8 @@ class RealEstateApifyProvider:
 
         return slug(neighborhood) in candidate_names
 
-    def sync_neighborhood_one_result(self, district, neighborhood):
-        raw_items, actor_input = self.run_one(district)
+    def sync_district(self, district, max_results=None):
+        raw_items, actor_input = self.run_district(district, max_results=max_results)
 
         accepted = []
         rejected = []
@@ -648,18 +649,24 @@ class RealEstateApifyProvider:
                 rejected.append({"reason": "parse"})
                 continue
 
-            if self.is_target(item, district, neighborhood):
-                accepted.append(item)
-            else:
+            if slug(getattr(item, "_city", "")) != "istanbul":
+                rejected.append({"reason": "wrong_city", "id": item.id})
+                continue
+
+            if slug(item.district) != slug(district):
                 rejected.append({
-                    "reason": "wrong_neighborhood",
+                    "reason": "wrong_district",
                     "id": item.id,
-                    "city": getattr(item, "_city", ""),
                     "district": item.district,
                     "quarter": getattr(item, "_quarter", ""),
-                    "neighborhood": getattr(item, "_raw_neighborhood", ""),
-                    "address": getattr(item, "_address", ""),
                 })
+                continue
+
+            # Kritik değişiklik:
+            # Mahalle burada filtrelenmez. Actor ilçe bazında çalışır.
+            # İlan gerçek quarter/neighborhood değeriyle PostgreSQL'e kaydedilir.
+            # PAS mahalle seçimini daha sonra tamamen PostgreSQL üzerinde uygular.
+            accepted.append(item)
 
         return {
             "raw_count": len(raw_items),
@@ -674,13 +681,13 @@ class RealEstateApifyProvider:
             headers={
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self.api_token}",
-                "User-Agent": "HLF-PAS/3.3",
+                "User-Agent": "HLF-PAS/3.4",
             },
             method="GET",
         )
         return self._request_json(req)
 
-    def import_old_real_estate_history(self, district, neighborhood, max_items=250):
+    def import_old_real_estate_history(self, district, max_items=1000):
         """
         Yeni Actor run başlatmaz.
         Sadece clearpath/sahibinden-real-estate geçmiş başarılı run datasetlerini okur.
@@ -737,7 +744,9 @@ class RealEstateApifyProvider:
                 if not item:
                     continue
 
-                if not self.is_target(item, district, neighborhood):
+                if slug(getattr(item, "_city", "")) != "istanbul":
+                    continue
+                if slug(item.district) != slug(district):
                     continue
 
                 if item.id in seen:
@@ -982,12 +991,11 @@ Seçili mahalleyle eşleşmeyen ilan kaydedilmez.
 </select>
 
 <button class="primary" id="searchButton" type="submit">Kayıtlı İlanları Analiz Et</button>
-<button class="secondary" id="syncButton" type="button">Real Estate Canlı Test (1 İlan)</button>
-<button class="secondary" id="historyButton" type="button">Eski Real Estate Verilerini İçe Aktar (Yeni Ücret Yok)</button>
+<button class="secondary" id="syncButton" type="button">Seçili İlçeyi Real Estate ile Güncelle</button>
+<button class="secondary" id="historyButton" type="button">Eski İlçe Verilerini İçe Aktar (Yeni Ücret Yok)</button>
 
 <div class="small" style="margin-top:10px">
-Önce eski başarılı Real Estate run'larını içe aktarmak en güvenli adımdır.
-Canlı Actor'ın resmi inputunda mahalle filtresi bulunmadığından tek ilanlık test ilçe bazında yapılır.
+Actor ilçe bazında çalışır; dönen ilanların gerçek mahalleleri PostgreSQL'e kaydedilir. PAS'taki mahalle seçimi daha sonra veritabanı üzerinde ücretsiz filtrelenir. Önce eski başarılı run'ları içe aktarmak yeni ücret oluşturmadan veri tabanını doldurur.
 </div>
 </div>
 </form>
@@ -1275,7 +1283,7 @@ document.getElementById("historyButton").addEventListener("click",async()=>{
  const pairs=getOnePair();
 
  if(pairs.length!==1){
-  showError("Eski verileri içe aktarmak için tam olarak 1 mahalle seçin.");
+  showError("İçe aktarma için bir ilçe ve o ilçeden bir mahalle seçin.");
   return;
  }
 
@@ -1284,7 +1292,7 @@ document.getElementById("historyButton").addEventListener("click",async()=>{
  const oldText=button.textContent;
 
  button.disabled=true;
- button.textContent="Eski Real Estate datasetleri aranıyor…";
+ button.textContent="Eski ilçe datasetleri aranıyor…";
 
  try{
   const result=await postJson("/api/import-history",{district,neighborhood});
@@ -1295,7 +1303,7 @@ document.getElementById("historyButton").addEventListener("click",async()=>{
   }
 
   showSuccess(
-   `${district} · ${neighborhood}: ${data.received} doğru eski ilan bulundu. `+
+   `${district}: ${data.received} eski ilçe ilanı bulundu ve mahalle bilgileriyle işlendi. `+
    `${data.new} yeni kayıt, ${data.updated} güncelleme. `+
    `Yeni Actor run BAŞLATILMADI.`
   );
@@ -1313,7 +1321,7 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
  const pairs=getOnePair();
 
  if(pairs.length!==1){
-  showError("Canlı test için tam olarak 1 mahalle seçin.");
+  showError("İlçe güncellemesi için bir ilçe ve o ilçeden bir mahalle seçin.");
   return;
  }
 
@@ -1322,7 +1330,7 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
  const oldText=button.textContent;
 
  button.disabled=true;
- button.textContent="Real Estate Actor 1 ilan kontrol ediyor…";
+ button.textContent="Real Estate ilçe verileri güncelleniyor…";
 
  try{
   const result=await postJson("/api/sync",{district,neighborhood});
@@ -1333,9 +1341,9 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
   }
 
   showSuccess(
-   `${district} · ${neighborhood}: ${data.raw_received} ilan çekildi; `+
-   `${data.accepted} hedef mahalleyle eşleşti. `+
-   `${data.new} yeni kayıt, ${data.updated} güncelleme.`
+   `${district}: ${data.raw_received} ilan çekildi; ${data.accepted} geçerli ilçe ilanı PostgreSQL için kabul edildi. `+
+   `${data.new} yeni kayıt, ${data.updated} güncelleme. `+
+   `${neighborhood} için veritabanında şu anda ${data.selected_neighborhood_count} ilan var.`
   );
 
  }catch(err){
@@ -1520,8 +1528,7 @@ def api_import_history():
 
         listings, inspected = APIFY.import_old_real_estate_history(
             district,
-            neighborhood,
-            max_items=250,
+            max_items=1000,
         )
 
         saved = save_listings_to_db(listings)
@@ -1560,53 +1567,25 @@ def api_sync():
     try:
         district, neighborhood = validate_pair(payload)
 
-        result = APIFY.sync_neighborhood_one_result(
+        result = APIFY.sync_district(
             district,
-            neighborhood,
+            max_results=LIVE_DISTRICT_MAX_RESULTS,
         )
 
         accepted = result["accepted"]
         rejected = result["rejected"]
 
         if not accepted:
-            if result["raw_count"] > 0 and rejected:
-                wrong = rejected[0]
-
-                returned_place = " / ".join(
-                    x for x in (
-                        str(wrong.get("city") or ""),
-                        str(wrong.get("district") or ""),
-                        str(
-                            wrong.get("quarter")
-                            or wrong.get("neighborhood")
-                            or ""
-                        ),
-                    )
-                    if x
-                )
-
-                message = (
-                    f"Real Estate Actor doğru ilçe filtresiyle 1 ilan üretti, "
-                    f"ancak bu ilan seçilen {district} · {neighborhood} mahallesinde değil. "
-                    f"Dönen: {returned_place or 'konum okunamadı'}. "
-                    "İlan PostgreSQL'e kaydedilmedi. "
-                    "Bu normal olabilir çünkü Actor'ın güncel inputunda mahalle filtresi yok; "
-                    "şimdilik tekrar tekrar canlı test yapmayın."
-                )
-
-            else:
-                message = (
-                    "Real Estate Actor 0 sonuç döndürdü. "
-                    "PostgreSQL kayıtları etkilenmedi."
-                )
-
+            message = (
+                f"{district} için Real Estate Actor ilçe bazında çalıştı ancak "
+                "kaydedilebilir ilan üretmedi. PostgreSQL kayıtları etkilenmedi."
+            )
             record_sync_state(
                 district,
                 neighborhood,
                 result_count=0,
                 error=message,
             )
-
             return jsonify(
                 ok=False,
                 error=message,
@@ -1618,10 +1597,17 @@ def api_sync():
 
         saved = save_listings_to_db(accepted)
 
+        # Kullanıcının seçtiği mahalle için DB'de kaç kayıt oluştuğunu ayrıca bildir.
+        selected_filters = {
+            "districts": [district],
+            "neighborhoods": {district: [neighborhood]},
+        }
+        selected_count = len(load_listings_from_db(selected_filters))
+
         record_sync_state(
             district,
             neighborhood,
-            result_count=len(accepted),
+            result_count=selected_count,
             error="",
         )
 
@@ -1632,8 +1618,9 @@ def api_sync():
             raw_received=result["raw_count"],
             accepted=len(accepted),
             rejected=len(rejected),
+            selected_neighborhood_count=selected_count,
             actor_input=result["actor_input"],
-            sync_limit=1,
+            sync_limit=LIVE_DISTRICT_MAX_RESULTS,
             **saved,
         )
 
@@ -1654,7 +1641,7 @@ def api_sync():
         return jsonify(
             ok=False,
             error=(
-                "Real Estate canlı testi yapılamadı: "
+                "Real Estate ilçe güncellemesi yapılamadı: "
                 f"{exc}. PostgreSQL kayıtları etkilenmedi."
             ),
         ), 502
@@ -1667,7 +1654,7 @@ def api_provider_status():
         database_configured=db_configured(),
         apify_configured=APIFY.configured(),
         actor_id=ACTOR_ID,
-        max_results=1,
+        max_results=LIVE_DISTRICT_MAX_RESULTS,
         extract_phone_numbers=False,
         max_items=1,
         max_total_charge_usd=SYNC_MAX_CHARGE_USD,
