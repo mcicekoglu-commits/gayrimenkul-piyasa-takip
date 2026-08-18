@@ -33,7 +33,9 @@ app = Flask(__name__)
 #   APIFY_TIMEOUT=300                              (opsiyonel)
 # Actor kod içinde sabit: clearpath~sahibinden-scraper-pro
 # DATABASE_URL Railway PostgreSQL bağlantısıdır.
-# PAS_SYNC_MAX_RESULTS=200 (tek mahalle güncellemesinde üst sınır)
+# PAS_SYNC_MAX_RESULTS=10 (öneri; kod en fazla 20 izin verir)
+#   PAS_SYNC_ENRICHMENT=false (öneri; summary-only düşük maliyet)
+#   PAS_SYNC_MAX_CHARGE_USD=0.25 (tek run için sert maliyet tavanı)
 # =========================================================
 
 DISTRICTS = [
@@ -844,19 +846,33 @@ class ApifyListingProvider(ListingProvider):
         # TEST MODU: Sistem oturana kadar her güncellemede en fazla 3 ilan.
         # Daha sonra bu üst sınırı artırabiliriz.
         self.max_results = parse_int(
-            os.environ.get("PAS_SYNC_MAX_RESULTS", "3")
+            os.environ.get("PAS_SYNC_MAX_RESULTS", "10")
         ) or 3
-        self.max_results = max(1, min(self.max_results, 3))
+        self.max_results = max(1, min(self.max_results, 20))
         self.timeout = parse_int(os.environ.get("APIFY_TIMEOUT", "300")) or 300
+        self.enrichment = str(os.environ.get("PAS_SYNC_ENRICHMENT", "false")).strip().lower() in {"1", "true", "yes", "on"}
+        try:
+            self.max_charge_usd = float(os.environ.get("PAS_SYNC_MAX_CHARGE_USD", "0.25"))
+        except ValueError:
+            self.max_charge_usd = 0.25
+        self.max_charge_usd = max(0.05, min(self.max_charge_usd, 2.0))
 
     def configured(self):
         return bool(self.api_token)
 
     def _run_actor(self, actor_input):
+        params = {
+            "clean": "true",
+            "limit": str(self.max_results),
+            # Apify-level hard guards. maxItems limits chargeable dataset items
+            # for pay-per-result Actors; maxTotalChargeUsd caps the entire run.
+            "maxItems": str(self.max_results),
+            "maxTotalChargeUsd": f"{self.max_charge_usd:.2f}",
+            "timeout": str(min(self.timeout, 300)),
+        }
         url = (
             f"https://api.apify.com/v2/acts/{self.actor_id}"
-            "/run-sync-get-dataset-items"
-            "?clean=true"
+            "/run-sync-get-dataset-items?" + urlencode(params)
         )
 
         body = json.dumps(actor_input, ensure_ascii=False).encode("utf-8")
@@ -1157,18 +1173,9 @@ class ApifyListingProvider(ListingProvider):
         # burada açıkça FALSE gönderiyoruz.
         actor_input = {
             "startUrls": [start_url],
-
-            # ÖNEMLİ: Bu Actor'ın güncel şemasında `enrichment`
-            # varsayılan olarak TRUE. Açık bırakılırsa detay + telefon
-            # zenginleştirmesi ve ek maliyet devreye girebilir.
-            # Test modunda kesin olarak kapatıyoruz.
-            "enrichment": True,
-
-            # Eski/yedek uyumluluk anahtarları da kapalı kalsın.
-            "includeDetails": False,
-            "extractPhoneNumbers": False,
-
-            # Sistem oturana kadar maksimum 3 ilan.
+            # Summary-only is the default cost mode. Turn on only if the
+            # extra detail fields are worth the extra per-listing charge.
+            "enrichment": self.enrichment,
             "maxResults": self.max_results,
         }
 
@@ -1207,6 +1214,76 @@ class ApifyListingProvider(ListingProvider):
             listings.append(normalized)
 
         return listings
+
+    def _get_json(self, url):
+        req = Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.api_token}",
+                "User-Agent": "HLF-PAS/3.0",
+            },
+            method="GET",
+        )
+        with urlopen(req, timeout=self.timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def import_paid_history(self, district, neighborhood, max_items=50):
+        """Read existing successful Apify datasets. Does NOT start a new Actor run."""
+        if not self.configured():
+            raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
+
+        runs_url = (
+            f"https://api.apify.com/v2/acts/{self.actor_id}/runs?"
+            + urlencode({"desc": "true", "limit": "100"})
+        )
+        payload = self._get_json(runs_url)
+        runs = ((payload.get("data") or {}).get("items") or []) if isinstance(payload, dict) else []
+
+        wanted_d = sahibinden_slug(district)
+        wanted_n = sahibinden_slug(neighborhood)
+        found = []
+        seen = set()
+
+        for run in runs:
+            if len(found) >= max_items:
+                break
+            if not isinstance(run, dict) or str(run.get("status") or "").upper() != "SUCCEEDED":
+                continue
+            dataset_id = run.get("defaultDatasetId")
+            if not dataset_id:
+                continue
+
+            items_url = (
+                f"https://api.apify.com/v2/datasets/{dataset_id}/items?"
+                + urlencode({"clean": "true", "limit": "200"})
+            )
+            try:
+                items = self._get_json(items_url)
+            except Exception:
+                continue
+            if not isinstance(items, list):
+                continue
+
+            for item in items:
+                if len(found) >= max_items:
+                    break
+                if not isinstance(item, dict):
+                    continue
+                normalized = self._normalize_item(item, district, neighborhood)
+                if not normalized:
+                    continue
+                if sahibinden_slug(normalized.district) != wanted_d:
+                    continue
+                if sahibinden_slug(normalized.neighborhood) != wanted_n:
+                    continue
+                lid = str(normalized.id)
+                if lid in seen:
+                    continue
+                seen.add(lid)
+                found.append(normalized)
+
+        return found[:max_items]
 
     def search(self, filters):
         raise RuntimeError(
@@ -1445,7 +1522,7 @@ th{font-size:12px;color:#6b7280}
 <body>
 <div class="container">
 <h1>HLF PAS</h1>
-<div class="subtitle">Piyasa Arama Sistemi <span class="small">v2.7-test3</span></div>
+<div class="subtitle">Piyasa Arama Sistemi <span class="small">v3.0-cache-first</span></div>
 
 <div class="card">
 <div class="notice">
@@ -1528,7 +1605,8 @@ Yeni ilanlar yalnızca "Yeni ilanları güncelle" düğmesiyle alınır.
 
 <button class="primary" id="searchButton" type="submit">Kayıtlı İlanları Analiz Et</button>
 <button class="secondary" id="syncButton" type="button">Yeni İlanları Güncelle (Apify)</button>
-<div class="sync-note">Normal analiz ücretsizdir. Güncelleme yalnızca seçili tek mahalle için Apify kullanır.</div>
+<button class="secondary" id="historyButton" type="button">Önceki Apify Verilerini İçe Aktar (Yeni Ücret Yok)</button>
+<div class="sync-note">Normal analiz PostgreSQL’den ve ücretsizdir. Canlı güncelleme seçili tek mahallede kontrollü sayıda ilan çeker. Önceki Apify verilerini içe aktarma yeni Actor run başlatmaz.</div>
 </div>
 </form>
 
@@ -1841,6 +1919,34 @@ document.getElementById("syncButton").addEventListener("click",async ()=>{
  }
 });
 
+
+document.getElementById("historyButton").addEventListener("click",async ()=>{
+ const errorBox=document.getElementById("errorBox");
+ const syncBox=document.getElementById("syncBox");
+ errorBox.classList.add("hidden"); syncBox.classList.add("hidden");
+ syncSelectedNeighborhoods();
+ const pairs=[];
+ [...selectedDistricts].forEach(d=>(selectedNeighborhoods[d]||[]).forEach(n=>pairs.push([d,n])));
+ if(pairs.length!==1){
+  document.getElementById("errorText").textContent="İçe aktarma için tam olarak 1 mahalle seçin.";
+  errorBox.classList.remove("hidden"); return;
+ }
+ const [district,neighborhood]=pairs[0];
+ const button=document.getElementById("historyButton"); const old=button.textContent;
+ button.disabled=true; button.textContent="Önceki ücretli veriler aranıyor…";
+ try{
+  const result=await postJson("/api/import-history",{district,neighborhood});
+  const data=result.data;
+  if(!result.ok||!data.ok) throw new Error(data.error||("İçe aktarma başarısız. HTTP "+result.status));
+  document.getElementById("syncText").textContent=
+   `${district} · ${neighborhood}: ${data.received} eski Apify kaydı bulundu; ${data.new} yeni, ${data.updated} güncellendi. Yeni Actor run başlatılmadı.`;
+  syncBox.classList.remove("hidden");
+ }catch(err){
+  document.getElementById("errorText").textContent=err.message||"İçe aktarma hatası.";
+  errorBox.classList.remove("hidden");
+ }finally{button.disabled=false;button.textContent=old;}
+});
+
 renderDistricts();
 </script>
 </body>
@@ -1946,6 +2052,28 @@ def api_search():
         }), 500
 
 
+@app.post("/api/import-history")
+def api_import_history():
+    """No new Actor run: reuse datasets from successful paid runs."""
+    payload = request.get_json(silent=True) or {}
+    district = str(payload.get("district") or "").strip()
+    neighborhood = str(payload.get("neighborhood") or "").strip()
+
+    allowed_districts = {d["name"] for d in DISTRICTS}
+    if district not in allowed_districts:
+        return jsonify({"ok": False, "error": "Geçersiz ilçe."}), 400
+    if neighborhood not in set(NEIGHBORHOODS.get(district, [])):
+        return jsonify({"ok": False, "error": "Geçersiz mahalle."}), 400
+
+    try:
+        listings = APIFY_SYNC_PROVIDER.import_paid_history(district, neighborhood, max_items=50)
+        result = save_listings_to_db(listings)
+        record_sync_state(district, neighborhood, result_count=len(listings), error="")
+        return jsonify({"ok": True, "received": len(listings), **result, "new_actor_run": False})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Önceki Apify verileri içe aktarılırken hata: {exc}"}), 502
+
+
 @app.post("/api/sync")
 def api_sync():
     """
@@ -1967,6 +2095,20 @@ def api_sync():
         listings = APIFY_SYNC_PROVIDER.sync_neighborhood(
             district, neighborhood
         )
+
+        if not listings:
+            message = (
+                "Apify 0 sonuç döndürdü. Mevcut PostgreSQL kayıtları korunuyor. "
+                "Apify hesabındaki aylık kullanım limiti doluysa yeni sonuç üretilemez; "
+                "limit açıldığında aynı kontrollü çağrı tekrar denenebilir."
+            )
+            record_sync_state(district, neighborhood, result_count=0, error=message)
+            return jsonify({
+                "ok": False,
+                "error": message,
+                "received": 0,
+                "sync_limit": APIFY_SYNC_PROVIDER.max_results,
+            }), 409
 
         result = save_listings_to_db(listings)
         record_sync_state(
@@ -2013,8 +2155,10 @@ def api_provider_status():
         "database_configured": db_configured(),
         "sync_actor_id": APIFY_SYNC_PROVIDER.actor_id,
         "sync_max_results": APIFY_SYNC_PROVIDER.max_results,
-        "sync_enrichment": False,
+        "sync_enrichment": APIFY_SYNC_PROVIDER.enrichment,
         "normal_search_uses_apify": False,
+        "sync_max_charge_usd": APIFY_SYNC_PROVIDER.max_charge_usd,
+        "history_import_starts_new_run": False,
     })
 
 
