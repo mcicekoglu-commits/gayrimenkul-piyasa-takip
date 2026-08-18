@@ -14,7 +14,7 @@ from psycopg.rows import dict_row
 app = Flask(__name__)
 
 # =========================================================
-# HLF PAS v3.6 — Çalışan Real Estate akışına dönüş
+# HLF PAS v3.7 — Çalışan Real Estate akışına dönüş
 #
 # Amaç:
 #   1) Normal analiz = sadece PostgreSQL (Apify maliyeti yok)
@@ -36,7 +36,7 @@ app = Flask(__name__)
 #   Bu nedenle Actor ilçe bazında çalışır. Mahalle doğrulaması çıktıdan yapılır.
 # =========================================================
 
-VERSION = "v3.6-turkish-location-fix"
+VERSION = "v3.7-table-and-auto-results"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -932,7 +932,7 @@ Tek run güvenlik tavanı: ${{ charge_cap }}.</div>
 <thead>
 <tr>
 <th>Mahalle</th><th>Oda</th><th>Yaş</th><th>Brüt</th><th>Net</th>
-<th>Fiyat</th><th>Brüt TL/m²</th><th>PAS</th>
+<th>Fiyat</th><th>Brüt TL/m²</th><th>Net TL/m²</th><th>PAS</th><th>İlan ID</th><th>İlan Tarihi</th>
 </tr>
 </thead>
 <tbody id="listingRows"></tbody>
@@ -1078,8 +1078,12 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
      <td>${esc(r.district)} · ${esc(r.neighborhood)}</td>
      <td>${esc(r.rooms)}</td><td>${r.building_age==null?"-":r.building_age+" yıl"}</td>
      <td>${r.gross_m2==null?"-":r.gross_m2+" m²"}</td><td>${r.net_m2==null?"-":r.net_m2+" m²"}</td>
-     <td>${money(r.price)}</td><td>${money(r.gross_price_m2)}</td>
+     <td>${money(r.price)}</td>
+     <td>${money(r.gross_price_m2)}</td>
+     <td>${money(r.net_price_m2)}</td>
      <td>${r.opportunity_score??"-"} <span class="small">${esc(r.opportunity_label||"")}</span></td>
+     <td>${esc(r.id||"-")}</td>
+     <td>${esc(r.listing_date||"-")}</td>
     </tr>`).join("");
 
   document.querySelectorAll(".listing-clickable").forEach(tr=>{
@@ -1109,6 +1113,11 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
    `${neighborhood} için PostgreSQL'de ${data.selected_neighborhood_count} ilan var.`+
    (top?`\nBu çekimde görülen mahalleler: ${top}`:"")
   );
+
+  // Güncelleme başarılı olunca aynı seçim ve filtrelerle
+  // PostgreSQL sonuçlarını otomatik olarak ekrana getir.
+  document.getElementById("pasForm").requestSubmit();
+
  }catch(err){showError(err.message||"Canlı güncelleme hatası.");}
  finally{button.disabled=false;button.textContent=oldText;}
 });
