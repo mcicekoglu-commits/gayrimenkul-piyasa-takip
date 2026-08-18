@@ -2,10 +2,10 @@ import os
 import re
 import json
 import statistics
-from dataclasses import dataclass, asdict
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
+from dataclasses import dataclass, asdict
 
 from flask import Flask, request, render_template_string, jsonify
 import psycopg
@@ -13,26 +13,30 @@ from psycopg.rows import dict_row
 
 app = Flask(__name__)
 
-APP_VERSION = "v3.4-realestate-safe2"
-
 # =========================================================
-# HLF PAS — Piyasa Arama Sistemi
+# HLF PAS v3.5 — Çalışan Real Estate akışına dönüş
+#
+# Amaç:
+#   1) Normal analiz = sadece PostgreSQL (Apify maliyeti yok)
+#   2) Canlı güncelleme = Real Estate Actor ile seçili İLÇEDE
+#      kontrollü sayıda ilan çek
+#   3) Dönen sonuçların gerçek quarter/neighborhood alanından
+#      mahalleyi belirle ve PostgreSQL'e kaydet
+#   4) Kullanıcı mahalle seçimini PostgreSQL üzerinde ücretsiz filtrele
 #
 # Railway Variables:
 #   DATABASE_URL=...
 #   APIFY_API_TOKEN=...
-#   APIFY_TIMEOUT=300                  (opsiyonel)
-#   PAS_LIVE_MAX_RESULTS=1             (test için 1)
-#   PAS_LIVE_MAX_CHARGE_USD=0.10       (sert maliyet tavanı)
+#   APIFY_TIMEOUT=300                (opsiyonel)
+#   PAS_SYNC_MAX_RESULTS=50          (önerilen başlangıç)
+#   PAS_SYNC_MAX_CHARGE_USD=0.75     (tek run güvenlik tavanı)
 #
-# Mimari:
-#   - Normal analiz sadece PostgreSQL'den çalışır -> Apify maliyeti yok.
-#   - Eski başarılı Real Estate run'ları yeni ücret oluşturmadan içe aktarılır.
-#   - Canlı test clearpath/sahibinden-real-estate Actor'ını ILÇE bazında çalıştırır.
-#   - Actor'ın resmi inputunda mahalle filtresi olmadığı için seçilen mahalle
-#     canlı çağrının inputuna gönderilmez; gerçek mahalle çıktıda okunur ve DB'ye yazılır.
-#   - PAS mahalle filtresi daha sonra PostgreSQL üzerinde ücretsiz uygulanır.
+# NOT:
+#   clearpath/sahibinden-real-estate Actor'ında mahalle input filtresi yok.
+#   Bu nedenle Actor ilçe bazında çalışır. Mahalle doğrulaması çıktıdan yapılır.
 # =========================================================
+
+VERSION = "v3.5-realestate-restored"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -75,7 +79,8 @@ NEIGHBORHOODS = {
         "Kuzguncuk", "Küçüksu", "Küplüce", "Mehmet Akif Ersoy",
         "Murat Reis", "Selami Ali", "Selimiye", "Ünalan", "Valide-i Atik",
         "Yavuztürk", "Ahmediye", "Aziz Mahmut Hüdayi", "Çengelköy",
-        "Küçük Çamlıca", "Mimar Sinan", "Sultantepe", "Zeynep Kamil", "Salacak"
+        "Küçük Çamlıca", "Mimar Sinan", "Sultantepe", "Zeynep Kamil",
+        "Salacak"
     ],
     "Ataşehir": [
         "Barbaros", "Küçükbakkalköy", "Esatpaşa", "İnönü", "Kayışdağı",
@@ -93,13 +98,15 @@ NEIGHBORHOODS = {
         "Esentepe", "Cevizli", "Yukarı", "Petrol İş", "Orhantepe",
         "Çavuşoğlu", "Karlıktepe", "Kordonboyu", "Yalı", "Yakacık Yeni",
         "Topselvi", "Cumhuriyet", "Hürriyet", "Yakacık Çarşı",
-        "Soğanlık Yeni", "Orta", "Gümüşpınar", "Uğur Mumcu", "Atalar", "Yunus"
+        "Soğanlık Yeni", "Orta", "Gümüşpınar", "Uğur Mumcu", "Atalar",
+        "Yunus"
     ],
     "Çekmeköy": [
         "Merkez", "Hamidiye", "Çamlık", "Nişantepe", "Mehmet Akif",
         "Soğukpınar", "Mimar Sinan", "Çatalmeşe", "Ekşioğlu", "Alemdağ",
         "Cumhuriyet", "Kirazlıdere", "Güngören", "Taşdelen", "Aydınlar",
-        "Ömerli", "Sultançiftliği", "Hüseyinli", "Koçullu", "Reşadiye", "Sırapınar"
+        "Ömerli", "Sultançiftliği", "Hüseyinli", "Koçullu", "Reşadiye",
+        "Sırapınar"
     ],
     "Beşiktaş": [
         "Gayrettepe", "Abbasağa", "Akat", "Arnavutköy", "Balmumcu",
@@ -117,10 +124,11 @@ NEIGHBORHOODS = {
         "Teşvikiye", "Yayla"
     ],
     "Bakırköy": [
-        "Ataköy 1. Kısım", "Ataköy 2. 5. 6. Kısım", "Ataköy 3-4-11. Kısım",
-        "Ataköy 7-8-9-10. Kısım", "Basınköy", "Kartaltepe", "Osmaniye",
-        "Sakızağacı", "Cevizlik", "Şenlikköy", "Yenimahalle", "Yeşilköy",
-        "Yeşilyurt", "Zeytinlik", "Zuhuratbaba"
+        "Ataköy 1. Kısım", "Ataköy 2. 5. 6. Kısım",
+        "Ataköy 3-4-11. Kısım", "Ataköy 7-8-9-10. Kısım",
+        "Basınköy", "Kartaltepe", "Osmaniye", "Sakızağacı", "Cevizlik",
+        "Şenlikköy", "Yenimahalle", "Yeşilköy", "Yeşilyurt",
+        "Zeytinlik", "Zuhuratbaba"
     ],
     "Bahçelievler": [
         "Bahçelievler", "Cumhuriyet", "Çobançeşme", "Fevzi Çakmak",
@@ -131,20 +139,24 @@ NEIGHBORHOODS = {
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 APIFY_API_TOKEN = os.environ.get("APIFY_API_TOKEN", "").strip()
-APIFY_TIMEOUT = max(30, min(int(os.environ.get("APIFY_TIMEOUT", "300") or 300), 300))
+APIFY_TIMEOUT = int(os.environ.get("APIFY_TIMEOUT", "300") or 300)
+
 ACTOR_ID = "clearpath~sahibinden-real-estate"
 
-try:
-    LIVE_DISTRICT_MAX_RESULTS = int(os.environ.get("PAS_LIVE_MAX_RESULTS", "1") or 1)
-except ValueError:
-    LIVE_DISTRICT_MAX_RESULTS = 1
-LIVE_DISTRICT_MAX_RESULTS = max(1, min(LIVE_DISTRICT_MAX_RESULTS, 20))
+def env_int(name, default):
+    try:
+        return int(os.environ.get(name, str(default)) or default)
+    except Exception:
+        return default
 
-try:
-    SYNC_MAX_CHARGE_USD = float(os.environ.get("PAS_LIVE_MAX_CHARGE_USD", "0.10") or 0.10)
-except ValueError:
-    SYNC_MAX_CHARGE_USD = 0.10
-SYNC_MAX_CHARGE_USD = max(0.05, min(SYNC_MAX_CHARGE_USD, 2.0))
+def env_float(name, default):
+    try:
+        return float(os.environ.get(name, str(default)) or default)
+    except Exception:
+        return default
+
+LIVE_DISTRICT_MAX_RESULTS = max(1, min(env_int("PAS_SYNC_MAX_RESULTS", 50), 500))
+SYNC_MAX_CHARGE_USD = max(0.10, min(env_float("PAS_SYNC_MAX_CHARGE_USD", 0.75), 10.0))
 
 
 def parse_int(value):
@@ -190,33 +202,9 @@ def normalize_place(value):
 
 def slug(value):
     text = normalize_place(value).casefold()
-    for src, dst in {"ı": "i", "ğ": "g", "ü": "u", "ş": "s", "ö": "o", "ç": "c"}.items():
-        text = text.replace(src, dst)
+    for a, b in {"ı":"i","ğ":"g","ü":"u","ş":"s","ö":"o","ç":"c"}.items():
+        text = text.replace(a, b)
     return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
-
-
-def pick(mapping, *keys):
-    if not isinstance(mapping, dict):
-        return None
-    for key in keys:
-        value = mapping.get(key)
-        if value not in (None, ""):
-            return value
-    return None
-
-
-def deep_pick(item, *keys):
-    """Top-level ve sık görülen nested location objelerinden alan bulur."""
-    containers = [item]
-    for name in ("location", "address", "locationHierarchy", "raw", "details"):
-        value = item.get(name) if isinstance(item, dict) else None
-        if isinstance(value, dict):
-            containers.append(value)
-    for container in containers:
-        value = pick(container, *keys)
-        if value not in (None, ""):
-            return value
-    return None
 
 
 @dataclass
@@ -242,10 +230,10 @@ class Listing:
         return round(self.price / self.net_m2) if self.price and self.net_m2 else None
 
     def to_dict(self):
-        data = asdict(self)
-        data["gross_price_m2"] = self.gross_price_m2
-        data["net_price_m2"] = self.net_price_m2
-        return data
+        d = asdict(self)
+        d["gross_price_m2"] = self.gross_price_m2
+        d["net_price_m2"] = self.net_price_m2
+        return d
 
 
 # =========================================================
@@ -265,6 +253,7 @@ def db_connect():
 def init_db():
     if not db_configured():
         return
+
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -287,7 +276,6 @@ def init_db():
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """)
-            cur.execute("ALTER TABLE pas_listings ADD COLUMN IF NOT EXISTS building_age INTEGER")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS pas_sync_state (
                     scope_key TEXT PRIMARY KEY,
@@ -301,10 +289,6 @@ def init_db():
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_pas_listings_location
                 ON pas_listings (district, neighborhood)
-            """)
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_pas_listings_active
-                ON pas_listings (active)
             """)
         conn.commit()
 
@@ -321,6 +305,7 @@ def save_listings_to_db(listings):
         with conn.cursor() as cur:
             for item in listings:
                 url = getattr(item, "_listing_url", "") or ""
+
                 cur.execute("SELECT 1 FROM pas_listings WHERE id=%s", (str(item.id),))
                 exists = cur.fetchone() is not None
 
@@ -338,7 +323,7 @@ def save_listings_to_db(listings):
                         district=EXCLUDED.district,
                         neighborhood=EXCLUDED.neighborhood,
                         title=EXCLUDED.title,
-                        price=COALESCE(EXCLUDED.price,pas_listings.price),
+                        price=EXCLUDED.price,
                         gross_m2=COALESCE(EXCLUDED.gross_m2,pas_listings.gross_m2),
                         net_m2=COALESCE(EXCLUDED.net_m2,pas_listings.net_m2),
                         rooms=CASE WHEN EXCLUDED.rooms<>'' THEN EXCLUDED.rooms ELSE pas_listings.rooms END,
@@ -352,13 +337,14 @@ def save_listings_to_db(listings):
                 """, (
                     str(item.id), item.district, item.neighborhood, item.title or "",
                     item.price, item.gross_m2, item.net_m2, item.rooms or "",
-                    item.listing_date or "", item.building_age, item.source or "", url,
+                    item.listing_date or "", item.building_age, item.source or "", url
                 ))
 
                 if exists:
                     updated_count += 1
                 else:
                     new_count += 1
+
         conn.commit()
 
     return {"saved": len(listings), "new": new_count, "updated": updated_count}
@@ -367,8 +353,10 @@ def save_listings_to_db(listings):
 def record_sync_state(district, neighborhood, result_count=0, error=""):
     if not db_configured():
         return
+
     init_db()
     key = f"{slug(district)}::{slug(neighborhood)}"
+
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -391,14 +379,16 @@ def listing_matches_filters(row, filters):
     if room and row.rooms != room:
         return False
 
-    for field, key, op in (
+    comparisons = (
         ("gross_m2", "min_m2", ">="),
         ("gross_m2", "max_m2", "<="),
         ("price", "min_price", ">="),
         ("price", "max_price", "<="),
         ("building_age", "building_age_min", ">="),
         ("building_age", "building_age_max", "<="),
-    ):
+    )
+
+    for field, key, op in comparisons:
         wanted = parse_int(filters.get(key))
         if wanted is None:
             continue
@@ -428,10 +418,11 @@ def listing_matches_filters(row, filters):
 def load_listings_from_db(filters):
     if not db_configured():
         return []
-    init_db()
 
+    init_db()
     districts = filters.get("districts") or []
     selected_nbs = filters.get("neighborhoods") or {}
+
     if not districts:
         return []
 
@@ -453,24 +444,26 @@ def load_listings_from_db(filters):
     }
 
     out = []
-    for row in rows:
-        if requested_pairs and (slug(row["district"]), slug(row["neighborhood"])) not in requested_pairs:
-            continue
+    for r in rows:
+        if requested_pairs:
+            if (slug(r["district"]), slug(r["neighborhood"])) not in requested_pairs:
+                continue
 
         item = Listing(
-            id=str(row["id"]),
-            district=row["district"] or "",
-            neighborhood=row["neighborhood"] or "",
-            title=row["title"] or "İlan",
-            price=parse_int(row["price"]),
-            gross_m2=parse_int(row["gross_m2"]),
-            net_m2=parse_int(row["net_m2"]),
-            rooms=row["rooms"] or "",
-            listing_date=row["listing_date"] or "",
-            building_age=parse_int(row["building_age"]),
-            source=row["source"] or "cache",
+            id=str(r["id"]),
+            district=r["district"] or "",
+            neighborhood=r["neighborhood"] or "",
+            title=r["title"] or "İlan",
+            price=parse_int(r["price"]),
+            gross_m2=parse_int(r["gross_m2"]),
+            net_m2=parse_int(r["net_m2"]),
+            rooms=r["rooms"] or "",
+            listing_date=r["listing_date"] or "",
+            building_age=parse_int(r["building_age"]),
+            source=r["source"] or "cache",
         )
-        item._listing_url = row["url"] or ""
+        item._listing_url = r["url"] or ""
+
         if listing_matches_filters(item, filters):
             out.append(item)
 
@@ -485,7 +478,7 @@ class RealEstateApifyProvider:
     def __init__(self):
         self.api_token = APIFY_API_TOKEN
         self.actor_id = ACTOR_ID
-        self.timeout = APIFY_TIMEOUT
+        self.timeout = max(30, min(APIFY_TIMEOUT, 300))
 
     def configured(self):
         return bool(self.api_token)
@@ -497,7 +490,7 @@ class RealEstateApifyProvider:
         except HTTPError as exc:
             detail = ""
             try:
-                detail = exc.read().decode("utf-8", errors="ignore")[:1200]
+                detail = exc.read().decode("utf-8", errors="ignore")[:1500]
             except Exception:
                 pass
             raise RuntimeError(f"Apify HTTP {exc.code}: {detail}") from exc
@@ -510,7 +503,7 @@ class RealEstateApifyProvider:
         if not self.configured():
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
-        limit = max(1, min(int(max_results or LIVE_DISTRICT_MAX_RESULTS), 20))
+        limit = max(1, min(int(max_results or LIVE_DISTRICT_MAX_RESULTS), 500))
 
         actor_input = {
             "listingType": "Sale",
@@ -534,7 +527,8 @@ class RealEstateApifyProvider:
         }
 
         url = (
-            f"https://api.apify.com/v2/acts/{self.actor_id}/run-sync-get-dataset-items?"
+            f"https://api.apify.com/v2/acts/{self.actor_id}"
+            "/run-sync-get-dataset-items?"
             + urlencode(params)
         )
 
@@ -545,53 +539,64 @@ class RealEstateApifyProvider:
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self.api_token}",
-                "User-Agent": f"HLF-PAS/{APP_VERSION}",
+                "User-Agent": f"HLF-PAS/{VERSION}",
             },
             method="POST",
         )
 
         payload = self._request_json(req)
+
         if isinstance(payload, list):
             return payload, actor_input
         if isinstance(payload, dict):
-            return payload.get("items") or payload.get("data") or payload.get("results") or [], actor_input
+            return (
+                payload.get("items")
+                or payload.get("data")
+                or payload.get("results")
+                or []
+            ), actor_input
         return [], actor_input
 
     def normalize_item(self, item):
         if not isinstance(item, dict):
             return None
 
-        listing_id = str(deep_pick(item, "id", "listingId", "adId", "classifiedId") or "").strip()
-        url = str(deep_pick(item, "url", "listingUrl", "href") or "").strip()
-        if url.startswith("/"):
-            url = "https://www.sahibinden.com" + url
-        if not listing_id and url:
-            match = re.search(r"(\d{8,})", url)
-            if match:
-                listing_id = match.group(1)
+        listing_id = str(item.get("id") or item.get("listingId") or "").strip()
+        url = str(item.get("url") or item.get("listingUrl") or "").strip()
 
-        price = parse_int(deep_pick(item, "price", "formattedPrice", "salePrice", "amount"))
+        if not listing_id and url:
+            m = re.search(r"(\d{8,})", url)
+            if m:
+                listing_id = m.group(1)
+
+        price = parse_int(item.get("price") or item.get("formattedPrice"))
         if not listing_id or price is None:
             return None
 
-        city = normalize_place(deep_pick(item, "city", "cityName", "il"))
-        district = normalize_place(deep_pick(item, "district", "districtName", "town", "ilce"))
-        quarter = normalize_place(deep_pick(item, "quarter", "quarterName"))
-        neighborhood = normalize_place(deep_pick(item, "neighborhood", "neighborhoodName", "mahalle"))
+        city = normalize_place(item.get("city"))
+        district = normalize_place(item.get("district"))
+
+        quarter = normalize_place(item.get("quarter"))
+        neighborhood = normalize_place(item.get("neighborhood"))
         effective_neighborhood = quarter or neighborhood
 
-        gross_m2 = parse_int(deep_pick(item, "grossSize", "grossM2", "gross_m2", "areaGross", "size"))
-        net_m2 = parse_int(deep_pick(item, "netSize", "netM2", "net_m2", "areaNet"))
-        rooms = str(deep_pick(item, "rooms", "roomCount", "room") or "").strip()
-        building_age = parse_int(deep_pick(item, "buildingAge", "building_age", "ageOfBuilding"))
-        listed_at = str(deep_pick(item, "listedAt", "listingDate", "createdAt", "date") or "").strip()
+        # Mahalle bilgisi yoksa yanlış mahalleye yazmıyoruz.
+        if not effective_neighborhood:
+            return None
+
+        rooms = str(item.get("rooms") or item.get("roomCount") or "").strip()
+        gross_m2 = parse_int(item.get("grossSize") or item.get("grossM2"))
+        net_m2 = parse_int(item.get("netSize") or item.get("netM2"))
+        building_age = parse_int(item.get("buildingAge"))
+
+        listed_at = str(item.get("listedAt") or item.get("listingDate") or "").strip()
         listing_date = listed_at[:10] if listed_at else ""
 
         listing = Listing(
             id=listing_id,
             district=district,
             neighborhood=effective_neighborhood,
-            title=str(deep_pick(item, "title", "listingTitle", "adTitle") or "İlan").strip(),
+            title=str(item.get("title") or "İlan").strip(),
             price=price,
             gross_m2=gross_m2,
             net_m2=net_m2,
@@ -600,115 +605,55 @@ class RealEstateApifyProvider:
             building_age=building_age,
             source="sahibinden-real-estate",
         )
+
         listing._listing_url = url
         listing._city = city
-        listing._quarter = quarter
-        listing._raw_neighborhood = neighborhood
         return listing
 
     def sync_district(self, district, max_results=None):
         raw_items, actor_input = self.run_district(district, max_results=max_results)
+
         accepted = []
-        rejected = []
-        seen = set()
+        rejected = {"parse": 0, "wrong_city": 0, "wrong_district": 0, "no_neighborhood": 0}
+        neighborhoods_seen = {}
 
         for raw in raw_items:
+            if not isinstance(raw, dict):
+                rejected["parse"] += 1
+                continue
+
+            raw_city = normalize_place(raw.get("city"))
+            raw_district = normalize_place(raw.get("district"))
+            raw_quarter = normalize_place(raw.get("quarter"))
+            raw_neighborhood = normalize_place(raw.get("neighborhood"))
+
             item = self.normalize_item(raw)
             if not item:
-                rejected.append({"reason": "parse"})
+                if not (raw_quarter or raw_neighborhood):
+                    rejected["no_neighborhood"] += 1
+                else:
+                    rejected["parse"] += 1
                 continue
 
-            city_slug = slug(getattr(item, "_city", ""))
-            if city_slug and city_slug != "istanbul":
-                rejected.append({"reason": "wrong_city", "id": item.id})
-                continue
-            if slug(item.district) != slug(district):
-                rejected.append({"reason": "wrong_district", "id": item.id, "district": item.district})
-                continue
-            if not item.neighborhood:
-                rejected.append({"reason": "missing_neighborhood", "id": item.id})
-                continue
-            if item.id in seen:
+            if slug(raw_city) != "istanbul":
+                rejected["wrong_city"] += 1
                 continue
 
-            seen.add(item.id)
+            if slug(raw_district) != slug(district):
+                rejected["wrong_district"] += 1
+                continue
+
             accepted.append(item)
+            key = item.neighborhood or "(boş)"
+            neighborhoods_seen[key] = neighborhoods_seen.get(key, 0) + 1
 
         return {
             "raw_count": len(raw_items),
             "accepted": accepted,
             "rejected": rejected,
             "actor_input": actor_input,
+            "neighborhoods_seen": neighborhoods_seen,
         }
-
-    def get_json(self, url):
-        req = Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {self.api_token}",
-                "User-Agent": f"HLF-PAS/{APP_VERSION}",
-            },
-            method="GET",
-        )
-        return self._request_json(req)
-
-    def import_old_real_estate_history(self, district, max_items=1000):
-        """Yeni Actor run başlatmaz; yalnızca eski başarılı datasetleri okur."""
-        if not self.configured():
-            raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
-
-        runs_url = (
-            f"https://api.apify.com/v2/acts/{self.actor_id}/runs?"
-            + urlencode({"desc": "true", "limit": "100"})
-        )
-        payload = self.get_json(runs_url)
-        runs = ((payload.get("data") or {}).get("items") or []) if isinstance(payload, dict) else []
-
-        accepted = []
-        seen = set()
-        inspected = 0
-
-        for run in runs:
-            if len(accepted) >= max_items:
-                break
-            if str(run.get("status") or "").upper() != "SUCCEEDED":
-                continue
-            dataset_id = run.get("defaultDatasetId")
-            if not dataset_id:
-                continue
-
-            items_url = (
-                f"https://api.apify.com/v2/datasets/{dataset_id}/items?"
-                + urlencode({"clean": "true", "limit": "1000"})
-            )
-            try:
-                items = self.get_json(items_url)
-            except Exception:
-                continue
-            if not isinstance(items, list):
-                continue
-
-            for raw in items:
-                if len(accepted) >= max_items:
-                    break
-                inspected += 1
-                item = self.normalize_item(raw)
-                if not item:
-                    continue
-                city_slug = slug(getattr(item, "_city", ""))
-                if city_slug and city_slug != "istanbul":
-                    continue
-                if slug(item.district) != slug(district):
-                    continue
-                if not item.neighborhood:
-                    continue
-                if item.id in seen:
-                    continue
-                seen.add(item.id)
-                accepted.append(item)
-
-        return accepted, inspected
 
 
 APIFY = RealEstateApifyProvider()
@@ -741,14 +686,15 @@ def analyze(listings):
     ages = [x.building_age for x in listings if x.building_age is not None]
 
     grouped = {}
-    for item in listings:
-        grouped.setdefault(f"{item.district} · {item.neighborhood}", []).append(item)
+    for x in listings:
+        grouped.setdefault(f"{x.district} · {x.neighborhood}", []).append(x)
 
     by_neighborhood = []
     for name, rows in grouped.items():
         ps = [x.price for x in rows if x.price]
         gs = [x.gross_price_m2 for x in rows if x.gross_price_m2]
         aa = [x.building_age for x in rows if x.building_age is not None]
+
         by_neighborhood.append({
             "name": name,
             "count": len(rows),
@@ -756,8 +702,6 @@ def analyze(listings):
             "median_gross_m2_price": round(statistics.median(gs)) if gs else None,
             "avg_building_age": round(statistics.mean(aa), 1) if aa else None,
         })
-
-    by_neighborhood.sort(key=lambda x: (x["median_gross_m2_price"] or 0), reverse=True)
 
     return {
         "count": len(listings),
@@ -772,16 +716,24 @@ def analyze(listings):
 
 def opportunity_analysis(listings):
     groups = {}
-    for item in listings:
-        groups.setdefault((item.district, item.neighborhood), []).append(item)
+    for x in listings:
+        groups.setdefault((x.district, x.neighborhood), []).append(x)
 
     result = []
-    for item in listings:
-        peers = groups[(item.district, item.neighborhood)]
-        values = [x.gross_price_m2 for x in peers if x.gross_price_m2]
-        median_gross = statistics.median(values) if values else None
-        delta = ((item.gross_price_m2 / median_gross) - 1) * 100 if median_gross and item.gross_price_m2 else None
+
+    for x in listings:
+        peers = groups[(x.district, x.neighborhood)]
+        gross_values = [p.gross_price_m2 for p in peers if p.gross_price_m2]
+        median_gross = statistics.median(gross_values) if gross_values else None
+
+        delta = (
+            ((x.gross_price_m2 / median_gross) - 1) * 100
+            if median_gross and x.gross_price_m2
+            else None
+        )
+
         score = max(0, min(100, round(50 - (delta or 0) * 2)))
+
         if score >= 70:
             label = "Dikkat çekici"
         elif score >= 58:
@@ -790,12 +742,14 @@ def opportunity_analysis(listings):
             label = "Piyasanın üstünde"
         else:
             label = "Piyasa civarı"
+
         result.append({
-            "id": item.id,
+            "id": x.id,
             "opportunity_score": score,
             "opportunity_label": label,
             "gross_vs_neighborhood_pct": round(delta, 1) if delta is not None else None,
         })
+
     return result
 
 
@@ -811,51 +765,140 @@ PAGE = r"""
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HLF PAS</title>
 <style>
-*{box-sizing:border-box}body{margin:0;padding:14px;background:#f4f5f7;color:#18202b;font-family:Arial,Helvetica,sans-serif}.container{max-width:900px;margin:auto}h1{font-size:46px;margin:0}.subtitle{color:#6b7280;margin:4px 0 18px}.card{background:#fff;border-radius:18px;padding:16px;margin-bottom:14px;box-shadow:0 4px 18px rgba(0,0,0,.07)}.title{font-size:19px;font-weight:800;margin-bottom:11px}.small{font-size:13px;color:#6b7280}.notice{background:#eef6ff;border:1px solid #cfe3ff;border-radius:10px;padding:10px;font-size:13px}.error{background:#fff1f1;border:1px solid #f4c4c4;border-radius:10px;padding:10px;font-size:13px;white-space:pre-wrap}.grid,.pair,.metrics,.neighborhoods{display:grid;grid-template-columns:1fr 1fr;gap:8px}.check{display:flex;align-items:center;gap:8px;padding:10px;border:1px solid #d9dde3;border-radius:11px;background:#fff}.check input{width:18px;height:18px}.favorite{background:#fffaf0;border:1px solid #eadfbe;border-radius:12px;padding:11px}.segmented{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:12px}.seg input{display:none}.seg span{display:block;text-align:center;padding:11px;border:1px solid #d9dde3;border-radius:10px;font-weight:700}.seg input:checked+span{background:#1f2937;color:#fff}details{border:1px solid #d9dde3;border-radius:12px;padding:0 11px;margin-top:9px}summary{padding:11px 0;font-weight:800}.neighborhood-box{border:1px solid #d9dde3;border-radius:12px;margin-top:10px;overflow:hidden}.neighborhood-head{background:#f2f3f5;padding:10px 12px;font-weight:800}.neighborhoods{padding:9px}.field{display:block;font-weight:800;margin:10px 0 5px}input[type=number],select{width:100%;padding:11px;border:1px solid #d9dde3;border-radius:10px;font-size:16px}.primary,.secondary{width:100%;margin-top:10px;padding:14px;border-radius:11px;font-size:17px;font-weight:800}.primary{border:0;background:#181818;color:#fff}.secondary{border:1px solid #ccd2da;background:#fff;color:#18202b}.primary:disabled,.secondary:disabled{opacity:.55}.hidden{display:none!important}.metric{padding:12px;border:1px solid #e1e5ea;border-radius:12px}.metric .k{font-size:12px;color:#6b7280}.metric .v{font-size:20px;font-weight:800}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:10px 8px;border-bottom:1px solid #eceff3;text-align:left;white-space:nowrap}.badge{padding:5px 8px;border-radius:999px;background:#eef2f7;font-size:12px}.listing-clickable{cursor:pointer}@media(max-width:600px){.grid,.pair,.metrics,.neighborhoods{grid-template-columns:1fr 1fr}}
+*{box-sizing:border-box}
+body{margin:0;padding:14px;background:#f4f5f7;color:#18202b;font-family:Arial,Helvetica,sans-serif}
+.container{max-width:900px;margin:auto}
+h1{font-size:46px;margin:0}
+.subtitle{color:#6b7280;margin:4px 0 18px}
+.card{background:#fff;border-radius:18px;padding:16px;margin-bottom:14px;box-shadow:0 4px 18px rgba(0,0,0,.07)}
+.title{font-size:19px;font-weight:800;margin-bottom:11px}
+.small{font-size:13px;color:#6b7280}
+.notice{background:#eef6ff;border:1px solid #cfe3ff;border-radius:10px;padding:10px;font-size:13px;white-space:pre-wrap}
+.error{background:#fff1f1;border:1px solid #f4c4c4;border-radius:10px;padding:10px;font-size:13px;white-space:pre-wrap}
+.grid,.pair,.metrics,.neighborhoods{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.check{display:flex;align-items:center;gap:8px;padding:10px;border:1px solid #d9dde3;border-radius:11px;background:#fff}
+.check input{width:18px;height:18px}
+.favorite{background:#fffaf0;border:1px solid #eadfbe;border-radius:12px;padding:11px}
+.segmented{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:12px}
+.seg input{display:none}
+.seg span{display:block;text-align:center;padding:11px;border:1px solid #d9dde3;border-radius:10px;font-weight:700}
+.seg input:checked+span{background:#1f2937;color:#fff}
+details{border:1px solid #d9dde3;border-radius:12px;padding:0 11px;margin-top:9px}
+summary{padding:11px 0;font-weight:800}
+.neighborhood-box{border:1px solid #d9dde3;border-radius:12px;margin-top:10px;overflow:hidden}
+.neighborhood-head{background:#f2f3f5;padding:10px 12px;font-weight:800}
+.neighborhoods{padding:9px}
+.field{display:block;font-weight:800;margin:10px 0 5px}
+input[type=number],select{width:100%;padding:11px;border:1px solid #d9dde3;border-radius:10px;font-size:16px}
+.primary,.secondary{width:100%;margin-top:10px;padding:14px;border-radius:11px;font-size:17px;font-weight:800}
+.primary{border:0;background:#181818;color:#fff}
+.secondary{border:1px solid #ccd2da;background:#fff;color:#18202b}
+.primary:disabled,.secondary:disabled{opacity:.55}
+.hidden{display:none!important}
+.metric{padding:12px;border:1px solid #e1e5ea;border-radius:12px}
+.metric .k{font-size:12px;color:#6b7280}
+.metric .v{font-size:20px;font-weight:800}
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:10px 8px;border-bottom:1px solid #eceff3;text-align:left;white-space:nowrap}
+.badge{padding:5px 8px;border-radius:999px;background:#eef2f7;font-size:12px}
+.listing-clickable{cursor:pointer}
 </style>
 </head>
 <body>
 <div class="container">
-<h1>HLF PAS</h1>
-<div class="subtitle">Piyasa Arama Sistemi <span class="small">{{ app_version }}</span></div>
 
-<div class="card"><div class="notice">
-<strong>Veri sağlayıcı:</strong> PostgreSQL kayıt sistemi.<br>
-Normal analiz Apify çalıştırmaz. Eski başarılı Real Estate run'larını içe aktarmak yeni Actor run başlatmaz.<br>
-Canlı test <strong>ilçe bazında en fazla {{ live_limit }} ilan</strong> çeker. Actor'ın mahalle inputu olmadığı için gerçek mahalle çıktıdan okunur ve PostgreSQL'e kaydedilir; seçtiğiniz mahalle daha sonra ücretsiz filtrelenir.
-</div></div>
+<h1>HLF PAS</h1>
+<div class="subtitle">Piyasa Arama Sistemi <span class="small">{{ version }}</span></div>
+
+<div class="card">
+<div class="notice"><strong>Veri sağlayıcı:</strong> PostgreSQL + Real Estate Actor.
+Normal analiz Apify çalıştırmaz.
+Canlı güncelleme seçili ilçeden en fazla {{ live_limit }} ilan çeker; telefon verisi çekmez.
+Gelen ilanlar gerçek mahalle bilgileriyle PostgreSQL'e kaydedilir.
+Tek run güvenlik tavanı: ${{ charge_cap }}.</div>
+</div>
 
 <form id="pasForm">
+
 <div class="card">
 <div class="title">Bölge seçimi</div>
+
 <div class="segmented">
 <label class="seg"><input type="radio" name="side" value="all" checked><span>Tümü</span></label>
 <label class="seg"><input type="radio" name="side" value="anadolu"><span>Anadolu</span></label>
 <label class="seg"><input type="radio" name="side" value="avrupa"><span>Avrupa</span></label>
 </div>
-<div class="favorite"><strong>★ Favoriler</strong><div id="favorites" class="grid" style="margin-top:8px"></div></div>
-<details><summary>11 İlçe</summary><div id="districts" class="grid" style="padding-bottom:10px"></div></details>
+
+<div class="favorite">
+<strong>★ Favoriler</strong>
+<div id="favorites" class="grid" style="margin-top:8px"></div>
+</div>
+
+<details>
+<summary>11 İlçe</summary>
+<div id="districts" class="grid" style="padding-bottom:10px"></div>
+</details>
+
 <div id="neighborhoodArea"></div>
 </div>
 
 <div class="card">
 <div class="title">İlan filtreleri</div>
-<div class="pair"><div><label class="field">Min m²</label><input name="min_m2" type="number" min="0"></div><div><label class="field">Max m²</label><input name="max_m2" type="number" min="0"></div></div>
-<div class="pair"><div><label class="field">Min Fiyat</label><input name="min_price" type="number" min="0"></div><div><label class="field">Max Fiyat</label><input name="max_price" type="number" min="0"></div></div>
-<div class="pair"><div><label class="field">Min Bina Yaşı</label><input name="building_age_min" type="number" min="0"></div><div><label class="field">Max Bina Yaşı</label><input name="building_age_max" type="number" min="0"></div></div>
-<details><summary>Net m² satış fiyatı</summary><div class="pair"><input name="net_m2_min" type="number" placeholder="Min TL/m²"><input name="net_m2_max" type="number" placeholder="Max TL/m²"></div></details>
-<details><summary>Brüt m² satış fiyatı</summary><div class="pair"><input name="gross_m2_min" type="number" placeholder="Min TL/m²"><input name="gross_m2_max" type="number" placeholder="Max TL/m²"></div></details>
+
+<div class="pair">
+<div><label class="field">Min m²</label><input name="min_m2" type="number" min="0"></div>
+<div><label class="field">Max m²</label><input name="max_m2" type="number" min="0"></div>
+</div>
+
+<div class="pair">
+<div><label class="field">Min Fiyat</label><input name="min_price" type="number" min="0"></div>
+<div><label class="field">Max Fiyat</label><input name="max_price" type="number" min="0"></div>
+</div>
+
+<div class="pair">
+<div><label class="field">Min Bina Yaşı</label><input name="building_age_min" type="number" min="0"></div>
+<div><label class="field">Max Bina Yaşı</label><input name="building_age_max" type="number" min="0"></div>
+</div>
+
+<details>
+<summary>Net m² satış fiyatı</summary>
+<div class="pair">
+<input name="net_m2_min" type="number" placeholder="Min TL/m²">
+<input name="net_m2_max" type="number" placeholder="Max TL/m²">
+</div>
+</details>
+
+<details>
+<summary>Brüt m² satış fiyatı</summary>
+<div class="pair">
+<input name="gross_m2_min" type="number" placeholder="Min TL/m²">
+<input name="gross_m2_max" type="number" placeholder="Max TL/m²">
+</div>
+</details>
+
 <label class="field">Oda Sayısı</label>
-<select name="rooms"><option value="">Farketmez</option><option>1+1</option><option>2+1</option><option>3+1</option><option>4+1</option><option>5+1 ve üzeri</option></select>
+<select name="rooms">
+<option value="">Farketmez</option>
+<option>1+1</option>
+<option>2+1</option>
+<option>3+1</option>
+<option>4+1</option>
+<option>5+1 ve üzeri</option>
+</select>
+
 <button class="primary" id="searchButton" type="submit">Kayıtlı İlanları Analiz Et</button>
-<button class="secondary" id="syncButton" type="button">Seçili İlçede Canlı Test (Apify · {{ live_limit }} İlan)</button>
-<button class="secondary" id="historyButton" type="button">Eski İlçe Verilerini İçe Aktar (Yeni Ücret Yok)</button>
-<div class="small" style="margin-top:10px">Önerilen sıra: önce eski başarılı ilçe run'larını ücretsiz içe aktarın. Canlı testi yalnızca yeni ilan kontrolü için kullanın.</div>
+<button class="secondary" id="syncButton" type="button">Seçili İlçeyi Güncelle (Apify)</button>
+
+<div class="small" style="margin-top:10px">
+Öneri: Önce bir ilçe + mahalle seçin. Güncelleme ilçe bazında veri getirir; seçtiğiniz mahalleye ait bulunan kayıt sayısı ayrıca raporlanır.
+</div>
 </div>
 </form>
 
 <div id="errorBox" class="card hidden"><div class="error" id="errorText"></div></div>
 <div id="syncBox" class="card hidden"><div class="notice" id="syncText"></div></div>
+
 <div id="resultsCard" class="card hidden">
 <div class="title">Piyasa özeti <span class="badge">kayıt</span></div>
 <div class="metrics">
@@ -866,49 +909,228 @@ Canlı test <strong>ilçe bazında en fazla {{ live_limit }} ilan</strong> çeke
 <div class="metric"><div class="k">Medyan net TL/m²</div><div class="v" id="mMedianNetM2">-</div></div>
 <div class="metric"><div class="k">Ort. bina yaşı</div><div class="v" id="mAvgAge">-</div></div>
 </div>
+
 <div class="title" style="margin-top:16px">İlanlar</div>
-<div class="table-wrap"><table><thead><tr><th>Mahalle</th><th>Oda</th><th>Yaş</th><th>Brüt</th><th>Net</th><th>Fiyat</th><th>Brüt TL/m²</th><th>PAS</th></tr></thead><tbody id="listingRows"></tbody></table></div>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+<th>Mahalle</th><th>Oda</th><th>Yaş</th><th>Brüt</th><th>Net</th>
+<th>Fiyat</th><th>Brüt TL/m²</th><th>PAS</th>
+</tr>
+</thead>
+<tbody id="listingRows"></tbody>
+</table>
 </div>
+</div>
+
 </div>
 
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_last_state_v4";
+const STATE_KEY="hlf_pas_last_state_v35";
+
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
-function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
-function money(n){return n==null?"-":new Intl.NumberFormat("tr-TR").format(n)+" ₺";}
-function sideValue(){return document.querySelector('input[name="side"]:checked')?.value||"all";}
-function domSlug(s){return s.toLocaleLowerCase("tr-TR").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g,"-");}
-function districtHtml(d){return `<label class="check"><input class="districtCheck" type="checkbox" value="${esc(d.name)}" ${selectedDistricts.has(d.name)?"checked":""}><span>${esc(d.name)}${d.favorite?" ★":""}</span></label>`;}
-function renderDistricts(){const side=sideValue();const visible=DISTRICTS.filter(d=>side==="all"||d.side===side);document.getElementById("districts").innerHTML=visible.map(districtHtml).join("");document.getElementById("favorites").innerHTML=visible.filter(d=>d.favorite).map(districtHtml).join("");document.querySelectorAll(".districtCheck").forEach(cb=>{cb.onchange=()=>{document.querySelectorAll(".districtCheck").forEach(x=>{if(x.value===cb.value)x.checked=cb.checked;});if(cb.checked){selectedDistricts.add(cb.value);renderNeighborhoodBlock(cb.value);}else{selectedDistricts.delete(cb.value);document.getElementById("nb-"+domSlug(cb.value))?.remove();syncSelectedNeighborhoods();}saveState();};});}
-function renderNeighborhoodBlock(district){const id="nb-"+domSlug(district);document.getElementById(id)?.remove();const selected=new Set(selectedNeighborhoods[district]||[]);const wrap=document.createElement("div");wrap.id=id;wrap.className="neighborhood-box";wrap.innerHTML=`<div class="neighborhood-head">${esc(district)} mahalleleri</div><div class="neighborhoods">${(NEIGHBORHOODS[district]||[]).map(n=>`<label class="check"><input class="neighborhoodCheck" type="checkbox" value="${esc(n)}" ${selected.has(n)?"checked":""}><span>${esc(n)}</span></label>`).join("")}</div>`;document.getElementById("neighborhoodArea").appendChild(wrap);wrap.querySelectorAll(".neighborhoodCheck").forEach(cb=>{cb.onchange=()=>{syncSelectedNeighborhoods();saveState();};});syncSelectedNeighborhoods();}
-function syncSelectedNeighborhoods(){const fresh={};selectedDistricts.forEach(d=>{const wrap=document.getElementById("nb-"+domSlug(d));fresh[d]=wrap?[...wrap.querySelectorAll(".neighborhoodCheck:checked")].map(x=>x.value):[];});selectedNeighborhoods=fresh;}
-function getOnePair(){syncSelectedNeighborhoods();const pairs=[];[...selectedDistricts].forEach(d=>(selectedNeighborhoods[d]||[]).forEach(n=>pairs.push([d,n])));return pairs;}
-function postJson(path,payload){return new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();xhr.open("POST",window.location.origin+path,true);xhr.setRequestHeader("Content-Type","application/json; charset=UTF-8");xhr.setRequestHeader("Accept","application/json");xhr.timeout=360000;xhr.onreadystatechange=()=>{if(xhr.readyState!==4)return;let data={};try{data=xhr.responseText?JSON.parse(xhr.responseText):{};}catch(_e){reject(new Error("Sunucu geçerli JSON döndürmedi. HTTP "+xhr.status));return;}resolve({ok:xhr.status>=200&&xhr.status<300,status:xhr.status,data});};xhr.onerror=()=>reject(new Error("Sunucuya bağlantı kurulamadı."));xhr.ontimeout=()=>reject(new Error("İstek zaman aşımına uğradı."));xhr.send(JSON.stringify(payload));});}
-function showError(text){document.getElementById("errorText").textContent=text;document.getElementById("errorBox").classList.remove("hidden");document.getElementById("syncBox").classList.add("hidden");}
-function showSuccess(text){document.getElementById("syncText").textContent=text;document.getElementById("syncBox").classList.remove("hidden");document.getElementById("errorBox").classList.add("hidden");}
 
-document.getElementById("pasForm").addEventListener("submit",async e=>{e.preventDefault();syncSelectedNeighborhoods();if(selectedDistricts.size===0){showError("En az bir ilçe seçin.");return;}const fd=new FormData(e.target);const payload={districts:[...selectedDistricts],neighborhoods:selectedNeighborhoods,rooms:fd.get("rooms")||"",min_m2:fd.get("min_m2")||"",max_m2:fd.get("max_m2")||"",min_price:fd.get("min_price")||"",max_price:fd.get("max_price")||"",building_age_min:fd.get("building_age_min")||"",building_age_max:fd.get("building_age_max")||"",net_m2_min:fd.get("net_m2_min")||"",net_m2_max:fd.get("net_m2_max")||"",gross_m2_min:fd.get("gross_m2_min")||"",gross_m2_max:fd.get("gross_m2_max")||""};const button=document.getElementById("searchButton");button.disabled=true;try{const result=await postJson("/api/search",payload);const data=result.data;if(!result.ok||!data.ok)throw new Error(data.error||("Arama başarısız. HTTP "+result.status));document.getElementById("mCount").textContent=data.analysis.count;document.getElementById("mMedianPrice").textContent=money(data.analysis.median_price);document.getElementById("mAvgPrice").textContent=money(data.analysis.avg_price);document.getElementById("mMedianM2").textContent=money(data.analysis.median_gross_m2_price);document.getElementById("mMedianNetM2").textContent=money(data.analysis.median_net_m2_price);document.getElementById("mAvgAge").textContent=data.analysis.avg_building_age==null?"-":data.analysis.avg_building_age+" yıl";document.getElementById("listingRows").innerHTML=data.listings.map(r=>`<tr class="${r.url?"listing-clickable":""}" data-url="${esc(r.url||"")}"><td>${esc(r.district)} · ${esc(r.neighborhood)}</td><td>${esc(r.rooms)}</td><td>${r.building_age==null?"-":r.building_age+" yıl"}</td><td>${r.gross_m2==null?"-":r.gross_m2+" m²"}</td><td>${r.net_m2==null?"-":r.net_m2+" m²"}</td><td>${money(r.price)}</td><td>${money(r.gross_price_m2)}</td><td>${r.opportunity_score??"-"} <span class="small">${esc(r.opportunity_label||"")}</span></td></tr>`).join("");document.querySelectorAll(".listing-clickable").forEach(tr=>{tr.onclick=()=>{if(tr.dataset.url)window.location.assign(tr.dataset.url);};});document.getElementById("resultsCard").classList.remove("hidden");}catch(err){showError(err.message||"Beklenmeyen hata.");}finally{button.disabled=false;}});
+function esc(s){
+ return String(s??"").replace(/[&<>"']/g,c=>({
+  "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+ }[c]));
+}
+function money(n){ return n==null?"-":new Intl.NumberFormat("tr-TR").format(n)+" ₺"; }
+function sideValue(){ return document.querySelector('input[name="side"]:checked')?.value||"all"; }
+function domSlug(s){
+ return s.toLocaleLowerCase("tr-TR").normalize("NFD")
+  .replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g,"-");
+}
+function districtHtml(d){
+ return `<label class="check"><input class="districtCheck" type="checkbox" value="${esc(d.name)}"
+ ${selectedDistricts.has(d.name)?"checked":""}><span>${esc(d.name)}${d.favorite?" ★":""}</span></label>`;
+}
+function renderDistricts(){
+ const side=sideValue();
+ const visible=DISTRICTS.filter(d=>side==="all"||d.side===side);
+ document.getElementById("districts").innerHTML=visible.map(districtHtml).join("");
+ document.getElementById("favorites").innerHTML=visible.filter(d=>d.favorite).map(districtHtml).join("");
 
-document.getElementById("historyButton").addEventListener("click",async()=>{const pairs=getOnePair();if(pairs.length!==1){showError("İçe aktarma için bir ilçe ve o ilçeden bir mahalle seçin.");return;}const [district,neighborhood]=pairs[0];const button=document.getElementById("historyButton"),oldText=button.textContent;button.disabled=true;button.textContent="Eski ilçe datasetleri aranıyor…";try{const result=await postJson("/api/import-history",{district,neighborhood});const data=result.data;if(!result.ok||!data.ok)throw new Error(data.error||("İçe aktarma başarısız. HTTP "+result.status));showSuccess(`${district}: ${data.received} eski ilçe ilanı bulundu; ${data.new} yeni kayıt, ${data.updated} güncelleme. Yeni Actor run BAŞLATILMADI. ${neighborhood} için kayıtlı ilan sayısı: ${data.selected_neighborhood_count}.`);}catch(err){showError(err.message||"İçe aktarma hatası.");}finally{button.disabled=false;button.textContent=oldText;}});
+ document.querySelectorAll(".districtCheck").forEach(cb=>{
+  cb.onchange=()=>{
+   document.querySelectorAll(".districtCheck").forEach(x=>{if(x.value===cb.value)x.checked=cb.checked;});
+   if(cb.checked){
+    selectedDistricts.add(cb.value);
+    renderNeighborhoodBlock(cb.value);
+   }else{
+    selectedDistricts.delete(cb.value);
+    document.getElementById("nb-"+domSlug(cb.value))?.remove();
+    syncSelectedNeighborhoods();
+   }
+   saveState();
+  };
+ });
+}
+function renderNeighborhoodBlock(district){
+ const id="nb-"+domSlug(district);
+ document.getElementById(id)?.remove();
+ const selected=new Set(selectedNeighborhoods[district]||[]);
+ const wrap=document.createElement("div");
+ wrap.id=id; wrap.className="neighborhood-box";
+ wrap.innerHTML=`<div class="neighborhood-head">${esc(district)} mahalleleri</div>
+ <div class="neighborhoods">${(NEIGHBORHOODS[district]||[]).map(n=>`
+ <label class="check"><input class="neighborhoodCheck" type="checkbox" value="${esc(n)}"
+ ${selected.has(n)?"checked":""}><span>${esc(n)}</span></label>`).join("")}</div>`;
+ document.getElementById("neighborhoodArea").appendChild(wrap);
+ wrap.querySelectorAll(".neighborhoodCheck").forEach(cb=>{
+  cb.onchange=()=>{syncSelectedNeighborhoods();saveState();};
+ });
+ syncSelectedNeighborhoods();
+}
+function syncSelectedNeighborhoods(){
+ const fresh={};
+ selectedDistricts.forEach(d=>{
+  const wrap=document.getElementById("nb-"+domSlug(d));
+  fresh[d]=wrap?[...wrap.querySelectorAll(".neighborhoodCheck:checked")].map(x=>x.value):[];
+ });
+ selectedNeighborhoods=fresh;
+}
+function getOnePair(){
+ syncSelectedNeighborhoods();
+ const pairs=[];
+ [...selectedDistricts].forEach(d=>(selectedNeighborhoods[d]||[]).forEach(n=>pairs.push([d,n])));
+ return pairs;
+}
+function postJson(path,payload){
+ return new Promise((resolve,reject)=>{
+  const xhr=new XMLHttpRequest();
+  xhr.open("POST",window.location.origin+path,true);
+  xhr.setRequestHeader("Content-Type","application/json; charset=UTF-8");
+  xhr.setRequestHeader("Accept","application/json");
+  xhr.timeout=360000;
+  xhr.onreadystatechange=()=>{
+   if(xhr.readyState!==4)return;
+   let data={};
+   try{data=xhr.responseText?JSON.parse(xhr.responseText):{};}
+   catch(_e){reject(new Error("Sunucu geçerli JSON döndürmedi. HTTP "+xhr.status));return;}
+   resolve({ok:xhr.status>=200&&xhr.status<300,status:xhr.status,data});
+  };
+  xhr.onerror=()=>reject(new Error("Sunucuya bağlantı kurulamadı."));
+  xhr.ontimeout=()=>reject(new Error("İstek zaman aşımına uğradı."));
+  xhr.send(JSON.stringify(payload));
+ });
+}
+function showError(text){
+ document.getElementById("errorText").textContent=text;
+ document.getElementById("errorBox").classList.remove("hidden");
+ document.getElementById("syncBox").classList.add("hidden");
+}
+function showSuccess(text){
+ document.getElementById("syncText").textContent=text;
+ document.getElementById("syncBox").classList.remove("hidden");
+ document.getElementById("errorBox").classList.add("hidden");
+}
 
-document.getElementById("syncButton").addEventListener("click",async()=>{const pairs=getOnePair();if(pairs.length!==1){showError("Canlı test için bir ilçe ve o ilçeden bir mahalle seçin.");return;}const [district,neighborhood]=pairs[0];const button=document.getElementById("syncButton"),oldText=button.textContent;button.disabled=true;button.textContent="Real Estate ilçe verileri kontrol ediliyor…";try{const result=await postJson("/api/sync",{district,neighborhood});const data=result.data;if(!result.ok||!data.ok)throw new Error(data.error||("Canlı test başarısız. HTTP "+result.status));showSuccess(`${district}: ${data.raw_received} ilan çekildi; ${data.accepted} geçerli ilçe ilanı kayda uygun bulundu. ${data.new} yeni kayıt, ${data.updated} güncelleme. ${neighborhood} için veritabanında şu anda ${data.selected_neighborhood_count} ilan var.`);}catch(err){showError(err.message||"Canlı test hatası.");}finally{button.disabled=false;button.textContent=oldText;}});
+document.getElementById("pasForm").addEventListener("submit",async e=>{
+ e.preventDefault();
+ syncSelectedNeighborhoods();
+ if(selectedDistricts.size===0){showError("En az bir ilçe seçin.");return;}
 
-function collectState(){syncSelectedNeighborhoods();const fd=new FormData(document.getElementById("pasForm"));const filters={};["rooms","min_m2","max_m2","min_price","max_price","building_age_min","building_age_max","net_m2_min","net_m2_max","gross_m2_min","gross_m2_max"].forEach(k=>filters[k]=fd.get(k)||"");return{side:sideValue(),districts:[...selectedDistricts],neighborhoods:selectedNeighborhoods,filters};}
+ const fd=new FormData(e.target);
+ const payload={
+  districts:[...selectedDistricts], neighborhoods:selectedNeighborhoods,
+  rooms:fd.get("rooms")||"", min_m2:fd.get("min_m2")||"", max_m2:fd.get("max_m2")||"",
+  min_price:fd.get("min_price")||"", max_price:fd.get("max_price")||"",
+  building_age_min:fd.get("building_age_min")||"", building_age_max:fd.get("building_age_max")||"",
+  net_m2_min:fd.get("net_m2_min")||"", net_m2_max:fd.get("net_m2_max")||"",
+  gross_m2_min:fd.get("gross_m2_min")||"", gross_m2_max:fd.get("gross_m2_max")||""
+ };
+
+ const button=document.getElementById("searchButton"); button.disabled=true;
+ try{
+  const result=await postJson("/api/search",payload), data=result.data;
+  if(!result.ok||!data.ok)throw new Error(data.error||("Arama başarısız. HTTP "+result.status));
+
+  document.getElementById("mCount").textContent=data.analysis.count;
+  document.getElementById("mMedianPrice").textContent=money(data.analysis.median_price);
+  document.getElementById("mAvgPrice").textContent=money(data.analysis.avg_price);
+  document.getElementById("mMedianM2").textContent=money(data.analysis.median_gross_m2_price);
+  document.getElementById("mMedianNetM2").textContent=money(data.analysis.median_net_m2_price);
+  document.getElementById("mAvgAge").textContent=data.analysis.avg_building_age==null?"-":data.analysis.avg_building_age+" yıl";
+
+  document.getElementById("listingRows").innerHTML=data.listings.map(r=>`
+    <tr class="${r.url?"listing-clickable":""}" data-url="${esc(r.url||"")}">
+     <td>${esc(r.district)} · ${esc(r.neighborhood)}</td>
+     <td>${esc(r.rooms)}</td><td>${r.building_age==null?"-":r.building_age+" yıl"}</td>
+     <td>${r.gross_m2==null?"-":r.gross_m2+" m²"}</td><td>${r.net_m2==null?"-":r.net_m2+" m²"}</td>
+     <td>${money(r.price)}</td><td>${money(r.gross_price_m2)}</td>
+     <td>${r.opportunity_score??"-"} <span class="small">${esc(r.opportunity_label||"")}</span></td>
+    </tr>`).join("");
+
+  document.querySelectorAll(".listing-clickable").forEach(tr=>{
+   tr.onclick=()=>{if(tr.dataset.url)window.location.assign(tr.dataset.url);};
+  });
+  document.getElementById("resultsCard").classList.remove("hidden");
+ }catch(err){showError(err.message||"Beklenmeyen hata.");}
+ finally{button.disabled=false;}
+});
+
+document.getElementById("syncButton").addEventListener("click",async()=>{
+ const pairs=getOnePair();
+ if(pairs.length!==1){showError("Güncelleme için tam olarak 1 ilçe ve o ilçeden 1 mahalle seçin.");return;}
+
+ const [district,neighborhood]=pairs[0];
+ const button=document.getElementById("syncButton"), oldText=button.textContent;
+ button.disabled=true; button.textContent="İlçe verileri çekiliyor…";
+
+ try{
+  const result=await postJson("/api/sync",{district,neighborhood}), data=result.data;
+  if(!result.ok||!data.ok)throw new Error(data.error||("Güncelleme başarısız. HTTP "+result.status));
+
+  const top = (data.neighborhoods_seen||[]).slice(0,8).map(x=>`${x.name}: ${x.count}`).join(", ");
+  showSuccess(
+   `${district}: Actor ${data.raw_received} ham ilan döndürdü; ${data.accepted} ilan kaydedilebilir bulundu. `+
+   `${data.new} yeni, ${data.updated} güncellendi. `+
+   `${neighborhood} için PostgreSQL'de ${data.selected_neighborhood_count} ilan var.`+
+   (top?`\nBu çekimde görülen mahalleler: ${top}`:"")
+  );
+ }catch(err){showError(err.message||"Canlı güncelleme hatası.");}
+ finally{button.disabled=false;button.textContent=oldText;}
+});
+
+function collectState(){
+ syncSelectedNeighborhoods();
+ const fd=new FormData(document.getElementById("pasForm")), filters={};
+ ["rooms","min_m2","max_m2","min_price","max_price","building_age_min","building_age_max",
+  "net_m2_min","net_m2_max","gross_m2_min","gross_m2_max"].forEach(k=>filters[k]=fd.get(k)||"");
+ return {side:sideValue(),districts:[...selectedDistricts],neighborhoods:selectedNeighborhoods,filters};
+}
 function saveState(){try{localStorage.setItem(STATE_KEY,JSON.stringify(collectState()));}catch(_e){}}
-function loadState(){let saved=null;try{saved=JSON.parse(localStorage.getItem(STATE_KEY)||"null");}catch(_e){}if(!saved)return;const sideEl=document.querySelector(`input[name="side"][value="${saved.side||"all"}"]`);if(sideEl)sideEl.checked=true;selectedDistricts=new Set((saved.districts||[]).filter(d=>DISTRICTS.some(x=>x.name===d)));selectedNeighborhoods={};const raw=saved.neighborhoods||{};selectedDistricts.forEach(d=>{const allowed=new Set(NEIGHBORHOODS[d]||[]);selectedNeighborhoods[d]=Array.isArray(raw[d])?raw[d].filter(n=>allowed.has(n)):[];});renderDistricts();selectedDistricts.forEach(d=>renderNeighborhoodBlock(d));Object.entries(saved.filters||{}).forEach(([name,value])=>{const el=document.querySelector(`[name="${name}"]`);if(el)el.value=value||"";});}
-document.querySelectorAll('input[name="side"]').forEach(el=>el.addEventListener("change",()=>{renderDistricts();saveState();}));document.getElementById("pasForm").addEventListener("change",saveState);document.getElementById("pasForm").addEventListener("input",saveState);renderDistricts();loadState();
+function loadState(){
+ let saved=null; try{saved=JSON.parse(localStorage.getItem(STATE_KEY)||"null");}catch(_e){}
+ if(!saved)return;
+ const sideEl=document.querySelector(`input[name="side"][value="${saved.side||"all"}"]`);
+ if(sideEl)sideEl.checked=true;
+ selectedDistricts=new Set((saved.districts||[]).filter(d=>DISTRICTS.some(x=>x.name===d)));
+ selectedNeighborhoods=saved.neighborhoods||{};
+ renderDistricts();
+ selectedDistricts.forEach(d=>renderNeighborhoodBlock(d));
+ Object.entries(saved.filters||{}).forEach(([name,value])=>{
+  const el=document.querySelector(`[name="${name}"]`); if(el)el.value=value||"";
+ });
+}
+document.querySelectorAll('input[name="side"]').forEach(el=>{
+ el.addEventListener("change",()=>{renderDistricts();saveState();});
+});
+document.getElementById("pasForm").addEventListener("change",saveState);
+document.getElementById("pasForm").addEventListener("input",saveState);
+
+renderDistricts();
+loadState();
 </script>
 </body>
 </html>
 """
 
-
-# =========================================================
-# Routes
-# =========================================================
 
 @app.get("/")
 def home():
@@ -916,14 +1138,16 @@ def home():
         PAGE,
         districts_json=json.dumps(DISTRICTS, ensure_ascii=False),
         neighborhoods_json=json.dumps(NEIGHBORHOODS, ensure_ascii=False),
-        app_version=APP_VERSION,
+        version=VERSION,
         live_limit=LIVE_DISTRICT_MAX_RESULTS,
+        charge_cap=f"{SYNC_MAX_CHARGE_USD:.2f}",
     )
 
 
 def validate_pair(payload):
     district = str(payload.get("district") or "").strip()
     neighborhood = str(payload.get("neighborhood") or "").strip()
+
     if district not in {d["name"] for d in DISTRICTS}:
         raise ValueError("Geçersiz ilçe.")
     if neighborhood not in set(NEIGHBORHOODS.get(district, [])):
@@ -931,18 +1155,12 @@ def validate_pair(payload):
     return district, neighborhood
 
 
-def neighborhood_count(district, neighborhood):
-    return len(load_listings_from_db({
-        "districts": [district],
-        "neighborhoods": {district: [neighborhood]},
-    }))
-
-
 @app.post("/api/search")
 def api_search():
     try:
         payload = request.get_json(silent=True) or {}
         allowed_districts = {d["name"] for d in DISTRICTS}
+
         districts = [d for d in (payload.get("districts") or []) if d in allowed_districts]
         if not districts:
             return jsonify(ok=False, error="Geçerli bir ilçe seçilmedi."), 400
@@ -951,11 +1169,14 @@ def api_search():
         neighborhoods = {}
         for district in districts:
             allowed_nbs = set(NEIGHBORHOODS.get(district, []))
-            neighborhoods[district] = [n for n in (raw_neighborhoods.get(district) or []) if n in allowed_nbs]
+            neighborhoods[district] = [
+                n for n in (raw_neighborhoods.get(district) or []) if n in allowed_nbs
+            ]
 
         filters = dict(payload)
         filters["districts"] = districts
         filters["neighborhoods"] = neighborhoods
+
         listings = load_listings_from_db(filters)
         analysis = analyze(listings)
         opportunity = {str(x["id"]): x for x in opportunity_analysis(listings)}
@@ -966,65 +1187,53 @@ def api_search():
             row.update(opportunity.get(str(item.id), {}))
             row["url"] = getattr(item, "_listing_url", "")
             rows.append(row)
-        rows.sort(key=lambda x: ((x.get("opportunity_score") or 0), x.get("listing_date") or ""), reverse=True)
 
         return jsonify(ok=True, provider="kayıt", analysis=analysis, listings=rows)
+
     except Exception as exc:
         return jsonify(ok=False, error=f"Kayıtlı veri hazırlanamadı: {exc}"), 500
-
-
-@app.post("/api/import-history")
-def api_import_history():
-    payload = request.get_json(silent=True) or {}
-    try:
-        district, neighborhood = validate_pair(payload)
-        listings, inspected = APIFY.import_old_real_estate_history(district, max_items=1000)
-        saved = save_listings_to_db(listings)
-        selected_count = neighborhood_count(district, neighborhood)
-        record_sync_state(district, neighborhood, result_count=selected_count, error="")
-        return jsonify(
-            ok=True,
-            district=district,
-            neighborhood=neighborhood,
-            received=len(listings),
-            inspected=inspected,
-            selected_neighborhood_count=selected_count,
-            new_actor_run=False,
-            **saved,
-        )
-    except ValueError as exc:
-        return jsonify(ok=False, error=str(exc)), 400
-    except Exception as exc:
-        return jsonify(ok=False, error=f"Eski Real Estate verileri içe aktarılamadı: {exc}"), 502
 
 
 @app.post("/api/sync")
 def api_sync():
     payload = request.get_json(silent=True) or {}
+
     try:
         district, neighborhood = validate_pair(payload)
+
         result = APIFY.sync_district(district, max_results=LIVE_DISTRICT_MAX_RESULTS)
         accepted = result["accepted"]
-        rejected = result["rejected"]
 
+        # Bu mesaj "mahallede ilan yok" demez; sadece Actor çıktısını raporlar.
         if not accepted:
             message = (
-                f"{district} için Actor {result['raw_count']} sonuç döndürdü fakat geçerli İstanbul/{district} "
-                "ve mahalle bilgisi olan kaydedilebilir ilan bulunamadı. PostgreSQL kayıtları etkilenmedi."
+                f"{district} için Actor {result['raw_count']} ham sonuç döndürdü fakat "
+                "İstanbul / doğru ilçe / mahalle bilgisi doğrulanabilen kayıt oluşmadı. "
+                "Bu, Sahibinden'de ilan olmadığı anlamına GELMEZ; Actor çıktısı doğrulanamadı."
             )
-            record_sync_state(district, neighborhood, result_count=neighborhood_count(district, neighborhood), error=message)
+            record_sync_state(district, neighborhood, 0, message)
             return jsonify(
                 ok=False,
                 error=message,
                 raw_received=result["raw_count"],
-                accepted=0,
-                rejected=len(rejected),
+                rejected=result["rejected"],
                 actor_input=result["actor_input"],
             ), 409
 
         saved = save_listings_to_db(accepted)
-        selected_count = neighborhood_count(district, neighborhood)
-        record_sync_state(district, neighborhood, result_count=selected_count, error="")
+
+        selected_filters = {
+            "districts": [district],
+            "neighborhoods": {district: [neighborhood]},
+        }
+        selected_count = len(load_listings_from_db(selected_filters))
+
+        seen_sorted = sorted(
+            [{"name": k, "count": v} for k, v in result["neighborhoods_seen"].items()],
+            key=lambda x: (-x["count"], x["name"])
+        )
+
+        record_sync_state(district, neighborhood, selected_count, "")
 
         return jsonify(
             ok=True,
@@ -1032,12 +1241,14 @@ def api_sync():
             neighborhood=neighborhood,
             raw_received=result["raw_count"],
             accepted=len(accepted),
-            rejected=len(rejected),
+            rejected=result["rejected"],
             selected_neighborhood_count=selected_count,
+            neighborhoods_seen=seen_sorted,
             actor_input=result["actor_input"],
             sync_limit=LIVE_DISTRICT_MAX_RESULTS,
             **saved,
         )
+
     except ValueError as exc:
         return jsonify(ok=False, error=str(exc)), 400
     except Exception as exc:
@@ -1045,29 +1256,30 @@ def api_sync():
             record_sync_state(
                 str(payload.get("district") or ""),
                 str(payload.get("neighborhood") or ""),
-                result_count=0,
-                error=str(exc)[:700],
+                0,
+                str(exc)[:700],
             )
         except Exception:
             pass
-        return jsonify(ok=False, error=f"Real Estate ilçe güncellemesi yapılamadı: {exc}. PostgreSQL kayıtları etkilenmedi."), 502
+
+        return jsonify(
+            ok=False,
+            error=f"Real Estate ilçe güncellemesi yapılamadı: {exc}. PostgreSQL kayıtları etkilenmedi.",
+        ), 502
 
 
 @app.get("/api/provider-status")
 def api_provider_status():
     return jsonify(
         ok=True,
-        app_version=APP_VERSION,
+        version=VERSION,
         database_configured=db_configured(),
         apify_configured=APIFY.configured(),
         actor_id=ACTOR_ID,
         max_results=LIVE_DISTRICT_MAX_RESULTS,
         extract_phone_numbers=False,
-        max_items=LIVE_DISTRICT_MAX_RESULTS,
         max_total_charge_usd=SYNC_MAX_CHARGE_USD,
-        neighborhood_input_supported=False,
         normal_search_uses_apify=False,
-        history_import_starts_new_run=False,
     )
 
 
