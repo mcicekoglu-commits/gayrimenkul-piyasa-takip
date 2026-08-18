@@ -36,7 +36,7 @@ app = Flask(__name__)
 #   Bu nedenle Actor ilçe bazında çalışır. Mahalle doğrulaması çıktıdan yapılır.
 # =========================================================
 
-VERSION = "v3.8-neighborhood-direct"
+VERSION = "v3.9-cost-guard"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -156,7 +156,7 @@ def env_float(name, default):
         return default
 
 LIVE_NEIGHBORHOOD_MAX_RESULTS = max(1, min(env_int("PAS_SYNC_MAX_RESULTS", 50), 500))
-SYNC_MAX_CHARGE_USD = max(0.10, min(env_float("PAS_SYNC_MAX_CHARGE_USD", 0.75), 10.0))
+SYNC_MAX_CHARGE_USD = max(0.01, min(env_float("PAS_SYNC_MAX_CHARGE_USD", 0.12), 10.0))
 
 
 def parse_int(value):
@@ -223,12 +223,57 @@ def slug(value):
     return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
 
 
-def sahibinden_neighborhood_url(district, neighborhood):
-    """Seçili mahalleye doğrudan Sahibinden satılık daire arama URL'si."""
-    return (
+def sahibinden_neighborhood_url(district, neighborhood, filters=None):
+    """
+    Seçili mahalleye doğrudan Sahibinden satılık daire arama URL'si.
+
+    Maliyet için mümkün olan filtreleri URL'ye taşır; böylece Actor önce
+    50 geniş sonuç çekip Python'da elemek yerine kaynağın kendisinde daralır.
+    """
+    filters = filters or {}
+
+    base = (
         "https://www.sahibinden.com/satilik-daire/"
-        f"istanbul-{slug(district)}-{slug(neighborhood)}"
+        f"istanbul-{slug(district)}-{slug(neighborhood)}-{slug(neighborhood)}-mah."
     )
+
+    params = {}
+
+    # Sahibinden'in native fiyat query parametreleri.
+    min_price = parse_int(filters.get("min_price"))
+    max_price = parse_int(filters.get("max_price"))
+    if min_price is not None:
+        params["price_min"] = str(min_price)
+    if max_price is not None:
+        params["price_max"] = str(max_price)
+
+    # Search-summary'de doğruladığımız attribute kodları.
+    # Actor native a* query parametrelerini destekliyor.
+    gross_min = parse_int(filters.get("min_m2"))
+    gross_max = parse_int(filters.get("max_m2"))
+    if gross_min is not None:
+        params["a24_min"] = str(gross_min)
+    if gross_max is not None:
+        params["a24_max"] = str(gross_max)
+
+    net_min = parse_int(filters.get("net_area_min"))
+    net_max = parse_int(filters.get("net_area_max"))
+    if net_min is not None:
+        params["a107889_min"] = str(net_min)
+    if net_max is not None:
+        params["a107889_max"] = str(net_max)
+
+    age_min = parse_int(filters.get("building_age_min"))
+    age_max = parse_int(filters.get("building_age_max"))
+    if age_min is not None:
+        params["a812_min"] = str(age_min)
+    if age_max is not None:
+        params["a812_max"] = str(age_max)
+
+    # En yeni ilanlar önce gelsin.
+    params["sorting"] = "date_desc"
+
+    return base + ("?" + urlencode(params) if params else "")
 
 
 @dataclass
@@ -314,6 +359,15 @@ def init_db():
                 CREATE INDEX IF NOT EXISTS idx_pas_listings_location
                 ON pas_listings (district, neighborhood)
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS pas_query_cache (
+                    query_key TEXT PRIMARY KEY,
+                    district TEXT NOT NULL,
+                    neighborhood TEXT NOT NULL,
+                    last_sync TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_received INTEGER NOT NULL DEFAULT 0
+                )
+            """)
         conn.commit()
 
 
@@ -398,7 +452,103 @@ def record_sync_state(district, neighborhood, result_count=0, error=""):
         conn.commit()
 
 
+
+def make_query_key(district, neighborhood, filters):
+    relevant = {
+        "district": district,
+        "neighborhood": neighborhood,
+        "rooms": str(filters.get("rooms") or ""),
+        "min_m2": str(filters.get("min_m2") or ""),
+        "max_m2": str(filters.get("max_m2") or ""),
+        "min_price": str(filters.get("min_price") or ""),
+        "max_price": str(filters.get("max_price") or ""),
+        "building_age_min": str(filters.get("building_age_min") or ""),
+        "building_age_max": str(filters.get("building_age_max") or ""),
+        "net_m2_min": str(filters.get("net_m2_min") or ""),
+        "net_m2_max": str(filters.get("net_m2_max") or ""),
+        "gross_m2_min": str(filters.get("gross_m2_min") or ""),
+        "gross_m2_max": str(filters.get("gross_m2_max") or ""),
+        "date_filter": str(filters.get("date_filter") or "current"),
+    }
+    return json.dumps(relevant, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def recently_synced_query(query_key, hours=1):
+    """Aynı sorgunun yanlışlıkla art arda ücretlendirilmesini önler."""
+    if not db_configured():
+        return False
+
+    init_db()
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT last_sync
+                FROM pas_query_cache
+                WHERE query_key = %s
+            """, (query_key,))
+            row = cur.fetchone()
+
+    if not row or not row["last_sync"]:
+        return False
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    age_seconds = (now - row["last_sync"]).total_seconds()
+    return age_seconds < (hours * 3600)
+
+
+def save_query_sync(query_key, district, neighborhood, received):
+    if not db_configured():
+        return
+
+    init_db()
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO pas_query_cache (
+                    query_key, district, neighborhood, last_sync, last_received
+                )
+                VALUES (%s, %s, %s, NOW(), %s)
+                ON CONFLICT (query_key) DO UPDATE SET
+                    district = EXCLUDED.district,
+                    neighborhood = EXCLUDED.neighborhood,
+                    last_sync = NOW(),
+                    last_received = EXCLUDED.last_received
+            """, (query_key, district, neighborhood, int(received or 0)))
+        conn.commit()
+
+
+def listing_date_is_allowed(listing_date, date_filter):
+    """
+    UI tarih filtresi. 'current' mevcut kayıtların tamamını gösterir.
+    7d/30d/90d yalnız seçilen dönemdeki kayıtları gösterir.
+    """
+    date_filter = str(date_filter or "current").strip()
+    if date_filter == "current":
+        return True
+
+    days_map = {"7d": 7, "30d": 30, "90d": 90}
+    days = days_map.get(date_filter)
+    if not days:
+        return True
+
+    text = str(listing_date or "").strip()
+    if not text:
+        return False
+
+    from datetime import date, timedelta
+    try:
+        d = date.fromisoformat(text[:10])
+    except Exception:
+        return False
+
+    return d >= (date.today() - timedelta(days=days))
+
+
 def listing_matches_filters(row, filters):
+    if not listing_date_is_allowed(row.listing_date, filters.get("date_filter")):
+        return False
+
     room = str(filters.get("rooms") or "").strip()
     if room and row.rooms != room:
         return False
@@ -552,12 +702,12 @@ class NeighborhoodApifyProvider:
 
         return None
 
-    def run_neighborhood(self, district, neighborhood, max_results=None):
+    def run_neighborhood(self, district, neighborhood, filters=None, max_results=None):
         if not self.configured():
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
         limit = max(1, min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), 5000))
-        start_url = sahibinden_neighborhood_url(district, neighborhood)
+        start_url = sahibinden_neighborhood_url(district, neighborhood, filters=filters)
 
         # Maliyet güvenliği:
         # - URL doğrudan seçili mahalleye gider.
@@ -566,6 +716,8 @@ class NeighborhoodApifyProvider:
         actor_input = {
             "startUrls": [start_url],
             "enrichment": False,
+            "includeDetails": False,
+            "extractPhoneNumbers": False,
             "maxResults": limit,
         }
 
@@ -727,10 +879,11 @@ class NeighborhoodApifyProvider:
         listing._city = city
         return listing
 
-    def sync_neighborhood(self, district, neighborhood, max_results=None):
+    def sync_neighborhood(self, district, neighborhood, filters=None, max_results=None):
         raw_items, actor_input, start_url = self.run_neighborhood(
             district,
             neighborhood,
+            filters=filters,
             max_results=max_results,
         )
 
@@ -936,8 +1089,8 @@ th,td{padding:10px 8px;border-bottom:1px solid #eceff3;text-align:left;white-spa
 <div class="notice"><strong>Veri sağlayıcı:</strong> PostgreSQL + Search Scraper Pro.
 Normal analiz Apify çalıştırmaz.
 Canlı güncelleme doğrudan seçili mahallenin Sahibinden arama URL'sinden en fazla {{ live_limit }} ilan çeker.
-Başka mahalleler taranmadığı için ücret yalnız hedef mahalleden dönen sonuçlara göre oluşur.
-Tek run güvenlik tavanı: ${{ charge_cap }}.</div>
+Fiyat ve m² gibi seçili filtreler mümkün olduğunca Sahibinden URL'sine taşınır; aynı sorgu 1 saat içinde tekrar ücretlendirilmez.
+Tek run sert güvenlik tavanı: ${{ charge_cap }}.</div>
 </div>
 
 <form id="pasForm">
@@ -998,6 +1151,14 @@ Tek run güvenlik tavanı: ${{ charge_cap }}.</div>
 </div>
 </details>
 
+<label class="field">Tarih</label>
+<select name="date_filter">
+<option value="current">Güncel</option>
+<option value="7d">Son 1 hafta</option>
+<option value="30d">Son 1 ay</option>
+<option value="90d">Son 3 ay</option>
+</select>
+
 <label class="field">Oda Sayısı</label>
 <select name="rooms">
 <option value="">Farketmez</option>
@@ -1037,7 +1198,7 @@ Güncelleme doğrudan seçili mahallenin Sahibinden arama URL'sine gider. Örne�
 <thead>
 <tr>
 <th>Mahalle</th><th>Oda</th><th>Yaş</th><th>Brüt</th><th>Net</th>
-<th>Fiyat</th><th>Brüt TL/m²</th><th>Net TL/m²</th><th>PAS</th><th>İlan Tarihi</th><th>İlan ID</th>
+<th>Fiyat</th><th>Brüt TL/m²</th><th>Net TL/m²</th><th>İlan Tarihi</th><th>İlan ID</th><th>PAS</th>
 </tr>
 </thead>
 <tbody id="listingRows"></tbody>
@@ -1159,6 +1320,7 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
  const fd=new FormData(e.target);
  const payload={
   districts:[...selectedDistricts], neighborhoods:selectedNeighborhoods,
+  date_filter:fd.get("date_filter")||"current",
   rooms:fd.get("rooms")||"", min_m2:fd.get("min_m2")||"", max_m2:fd.get("max_m2")||"",
   min_price:fd.get("min_price")||"", max_price:fd.get("max_price")||"",
   building_age_min:fd.get("building_age_min")||"", building_age_max:fd.get("building_age_max")||"",
@@ -1186,9 +1348,9 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
      <td>${money(r.price)}</td>
      <td>${money(r.gross_price_m2)}</td>
      <td>${money(r.net_price_m2)}</td>
-     <td>${r.opportunity_score??"-"} <span class="small">${esc(r.opportunity_label||"")}</span></td>
      <td>${esc(r.listing_date||"-")}</td>
      <td>${esc(r.id||"-")}</td>
+     <td>${r.opportunity_score??"-"} <span class="small">${esc(r.opportunity_label||"")}</span></td>
     </tr>`).join("");
 
   document.querySelectorAll(".listing-clickable").forEach(tr=>{
@@ -1208,7 +1370,18 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
  button.disabled=true; button.textContent="Mahalle ilanları çekiliyor…";
 
  try{
-  const result=await postJson("/api/sync",{district,neighborhood}), data=result.data;
+  const fd=new FormData(document.getElementById("pasForm"));
+  const syncPayload={
+   district, neighborhood,
+   date_filter:fd.get("date_filter")||"current",
+   rooms:fd.get("rooms")||"",
+   min_m2:fd.get("min_m2")||"", max_m2:fd.get("max_m2")||"",
+   min_price:fd.get("min_price")||"", max_price:fd.get("max_price")||"",
+   building_age_min:fd.get("building_age_min")||"", building_age_max:fd.get("building_age_max")||"",
+   net_m2_min:fd.get("net_m2_min")||"", net_m2_max:fd.get("net_m2_max")||"",
+   gross_m2_min:fd.get("gross_m2_min")||"", gross_m2_max:fd.get("gross_m2_max")||""
+  };
+  const result=await postJson("/api/sync",syncPayload), data=result.data;
   if(!result.ok||!data.ok)throw new Error(data.error||("Güncelleme başarısız. HTTP "+result.status));
 
   showSuccess(
@@ -1228,7 +1401,7 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
 function collectState(){
  syncSelectedNeighborhoods();
  const fd=new FormData(document.getElementById("pasForm")), filters={};
- ["rooms","min_m2","max_m2","min_price","max_price","building_age_min","building_age_max",
+ ["date_filter","rooms","min_m2","max_m2","min_price","max_price","building_age_min","building_age_max",
   "net_m2_min","net_m2_max","gross_m2_min","gross_m2_max"].forEach(k=>filters[k]=fd.get(k)||"");
  return {side:sideValue(),districts:[...selectedDistricts],neighborhoods:selectedNeighborhoods,filters};
 }
@@ -1329,18 +1502,66 @@ def api_sync():
     try:
         district, neighborhood = validate_pair(payload)
 
+        filters = {
+            "date_filter": payload.get("date_filter", "current"),
+            "rooms": payload.get("rooms", ""),
+            "min_m2": payload.get("min_m2", ""),
+            "max_m2": payload.get("max_m2", ""),
+            "min_price": payload.get("min_price", ""),
+            "max_price": payload.get("max_price", ""),
+            "building_age_min": payload.get("building_age_min", ""),
+            "building_age_max": payload.get("building_age_max", ""),
+            "net_m2_min": payload.get("net_m2_min", ""),
+            "net_m2_max": payload.get("net_m2_max", ""),
+            "gross_m2_min": payload.get("gross_m2_min", ""),
+            "gross_m2_max": payload.get("gross_m2_max", ""),
+        }
+
+        query_key = make_query_key(district, neighborhood, filters)
+
+        # Aynı sorguya art arda basılırsa 1 saat boyunca yeni Apify run başlatma.
+        if recently_synced_query(query_key, hours=1):
+            selected_filters = {
+                **filters,
+                "districts": [district],
+                "neighborhoods": {district: [neighborhood]},
+            }
+            selected_count = len(load_listings_from_db(selected_filters))
+
+            return jsonify(
+                ok=True,
+                district=district,
+                neighborhood=neighborhood,
+                raw_received=0,
+                accepted=0,
+                new=0,
+                updated=0,
+                selected_neighborhood_count=selected_count,
+                cached=True,
+                message="Aynı sorgu son 1 saat içinde güncellendi; yeni Apify ücreti oluşturulmadı.",
+            )
+
         result = APIFY.sync_neighborhood(
             district,
             neighborhood,
+            filters=filters,
             max_results=LIVE_NEIGHBORHOOD_MAX_RESULTS,
         )
-        accepted = result["accepted"]
+
+        # URL'de uygulanamayan filtreleri burada son kez kontrol et.
+        accepted = [
+            item for item in result["accepted"]
+            if listing_matches_filters(item, filters)
+        ]
 
         if not accepted:
+            save_query_sync(query_key, district, neighborhood, result["raw_count"])
+
             message = (
-                f"{district} / {neighborhood} için doğrudan mahalle araması "
-                f"{result['raw_count']} ham sonuç döndürdü fakat kaydedilebilir ilan oluşmadı. "
-                "PostgreSQL kayıtları etkilenmedi."
+                f"{district} / {neighborhood} için kaynak sorgusu "
+                f"{result['raw_count']} ham sonuç döndürdü; seçili filtrelerden sonra "
+                "kaydedilecek ilan kalmadı. Aynı sorguya 1 saat içinde tekrar basılırsa "
+                "yeni Apify run başlatılmayacak."
             )
             record_sync_state(district, neighborhood, 0, message)
 
@@ -1354,8 +1575,10 @@ def api_sync():
             ), 409
 
         saved = save_listings_to_db(accepted)
+        save_query_sync(query_key, district, neighborhood, result["raw_count"])
 
         selected_filters = {
+            **filters,
             "districts": [district],
             "neighborhoods": {district: [neighborhood]},
         }
@@ -1374,6 +1597,7 @@ def api_sync():
             actor_input=result["actor_input"],
             start_url=result["start_url"],
             sync_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
+            cached=False,
             **saved,
         )
 
@@ -1410,6 +1634,7 @@ def api_provider_status():
         max_total_charge_usd=SYNC_MAX_CHARGE_USD,
         normal_search_uses_apify=False,
         neighborhood_direct_url=True,
+        repeat_query_guard_hours=1,
     )
 
 
