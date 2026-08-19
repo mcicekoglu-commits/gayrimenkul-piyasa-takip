@@ -36,7 +36,7 @@ app = Flask(__name__)
 #   Bu nedenle Actor ilçe bazında çalışır. Mahalle doğrulaması çıktıdan yapılır.
 # =========================================================
 
-VERSION = "v4.0-hard-cost-cap"
+VERSION = "v4.1-exact-neighborhood-costsafe"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -226,56 +226,64 @@ def slug(value):
 
 
 def sahibinden_neighborhood_url(district, neighborhood, filters=None):
-    """
-    Seçili mahalleye doğrudan Sahibinden satılık daire arama URL'si.
-
-    Maliyet için mümkün olan filtreleri URL'ye taşır; böylece Actor önce
-    50 geniş sonuç çekip Python'da elemek yerine kaynağın kendisinde daralır.
-    """
+    """Gerçek Sahibinden SEO mahalle URL'si + kaynak tarafı filtreleri."""
     filters = filters or {}
 
+    # Doğrulanan SEO biçimi:
+    # /satilik-daire/istanbul-kadikoy-kosuyolu-kosuyolu-mh.
+    nb = slug(neighborhood)
     base = (
         "https://www.sahibinden.com/satilik-daire/"
-        f"istanbul-{slug(district)}-{slug(neighborhood)}-{slug(neighborhood)}-mah."
+        f"istanbul-{slug(district)}-{nb}-{nb}-mh."
     )
 
-    params = {}
+    pairs = []
 
-    # Sahibinden'in native fiyat query parametreleri.
-    min_price = parse_int(filters.get("min_price"))
-    max_price = parse_int(filters.get("max_price"))
-    if min_price is not None:
-        params["price_min"] = str(min_price)
-    if max_price is not None:
-        params["price_max"] = str(max_price)
+    def add(k, v):
+        if v not in (None, ""):
+            pairs.append((k, str(v)))
 
-    # Search-summary'de doğruladığımız attribute kodları.
-    # Actor native a* query parametrelerini destekliyor.
-    gross_min = parse_int(filters.get("min_m2"))
-    gross_max = parse_int(filters.get("max_m2"))
-    if gross_min is not None:
-        params["a24_min"] = str(gross_min)
-    if gross_max is not None:
-        params["a24_max"] = str(gross_max)
+    # Numeric filters that Sahibinden search URLs accept.
+    add("price_min", parse_int(filters.get("min_price")))
+    add("price_max", parse_int(filters.get("max_price")))
+    add("a24_min", parse_int(filters.get("min_m2")))      # Brüt m²
+    add("a24_max", parse_int(filters.get("max_m2")))
+    add("a107889_min", parse_int(filters.get("net_area_min") or filters.get("net_m2_min")))
+    add("a107889_max", parse_int(filters.get("net_area_max") or filters.get("net_m2_max")))
 
-    net_min = parse_int(filters.get("net_area_min"))
-    net_max = parse_int(filters.get("net_area_max"))
-    if net_min is not None:
-        params["a107889_min"] = str(net_min)
-    if net_max is not None:
-        params["a107889_max"] = str(net_max)
-
+    # Bina yaşı SAYISAL min/max değildir; Sahibinden bunu kategorik a812 kodlarıyla tutar.
+    # Doğrulanmış seri: 1->40602, 2->40603, 3->40604, 4->40605, 5->40606.
+    # 0 için iki ayrı kategori olabilir; ikisini de dahil ediyoruz.
     age_min = parse_int(filters.get("building_age_min"))
     age_max = parse_int(filters.get("building_age_max"))
-    if age_min is not None:
-        params["a812_min"] = str(age_min)
-    if age_max is not None:
-        params["a812_max"] = str(age_max)
+    age_codes = {
+        0: ["40600", "40601"],
+        1: ["40602"],
+        2: ["40603"],
+        3: ["40604"],
+        4: ["40605"],
+        5: ["40606"],
+    }
+    if age_min is not None or age_max is not None:
+        lo = 0 if age_min is None else max(0, age_min)
+        hi = 5 if age_max is None else min(5, age_max)
+        if lo <= hi:
+            for age in range(lo, hi + 1):
+                for code in age_codes.get(age, []):
+                    pairs.append(("a812", code))
 
-    # En yeni ilanlar önce gelsin.
-    params["sorting"] = "date_desc"
+    # Oda sayısı: yalnız doğrulanmış değerleri kaynağa taşı; diğerleri DB filtresinde kalır.
+    room_codes = {
+        "1+1": "38473",
+        "3+1": "38474",
+    }
+    room = str(filters.get("rooms") or "").strip()
+    if room in room_codes:
+        add("a20", room_codes[room])
 
-    return base + ("?" + urlencode(params) if params else "")
+    add("sorting", "date_desc")
+
+    return base + ("?" + urlencode(pairs) if pairs else "")
 
 
 @dataclass
@@ -718,7 +726,6 @@ class NeighborhoodApifyProvider:
         # - maxResults yalnızca bu mahallenin sonuçlarına uygulanır.
         actor_input = {
             "startUrls": [start_url],
-            "enrichment": False,
             "includeDetails": False,
             "extractPhoneNumbers": False,
             "maxResults": limit,
@@ -1565,10 +1572,9 @@ def api_sync():
             save_query_sync(query_key, district, neighborhood, result["raw_count"])
 
             message = (
-                f"{district} / {neighborhood} için kaynak sorgusu "
-                f"{result['raw_count']} ham sonuç döndürdü; seçili filtrelerden sonra "
-                "kaydedilecek ilan kalmadı. Aynı sorguya 1 saat içinde tekrar basılırsa "
-                "yeni Apify run başlatılmayacak."
+                f"{district} / {neighborhood}: Actor {result['raw_count']} ücretli/ham sonuç döndürdü; "
+                "PAS doğrulamasından sonra kayıt oluşmadı. Bu, Sahibinden’de ilan olmadığı anlamına gelmez. "
+                "Aynı sorguya 1 saat içinde tekrar basılırsa yeni Apify run başlatılmayacak."
             )
             record_sync_state(district, neighborhood, 0, message)
 
@@ -1647,6 +1653,7 @@ def api_provider_status():
         max_paid_items=SYNC_MAX_PAID_ITEMS,
         listing_unit_usd=SYNC_LISTING_UNIT_USD,
         hard_cost_cap_usd=SYNC_MAX_CHARGE_USD,
+        verified_neighborhood_url_pattern=True,
     )
 
 
