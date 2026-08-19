@@ -36,7 +36,7 @@ app = Flask(__name__)
 #   Bu nedenle Actor ilçe bazında çalışır. Mahalle doğrulaması çıktıdan yapılır.
 # =========================================================
 
-VERSION = "v3.9-cost-guard"
+VERSION = "v4.0-hard-cost-cap"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -155,8 +155,10 @@ def env_float(name, default):
     except Exception:
         return default
 
-LIVE_NEIGHBORHOOD_MAX_RESULTS = max(1, min(env_int("PAS_SYNC_MAX_RESULTS", 50), 500))
-SYNC_MAX_CHARGE_USD = max(0.01, min(env_float("PAS_SYNC_MAX_CHARGE_USD", 0.12), 10.0))
+LIVE_NEIGHBORHOOD_MAX_RESULTS = max(1, min(env_int("PAS_SYNC_MAX_RESULTS", 3), 500))
+SYNC_MAX_CHARGE_USD = max(0.01, min(env_float("PAS_SYNC_MAX_CHARGE_USD", 0.02), 10.0))
+SYNC_LISTING_UNIT_USD = max(0.0001, env_float("PAS_LISTING_UNIT_USD", 0.00599))
+SYNC_MAX_PAID_ITEMS = max(1, min(LIVE_NEIGHBORHOOD_MAX_RESULTS, int(SYNC_MAX_CHARGE_USD / SYNC_LISTING_UNIT_USD)))
 
 
 def parse_int(value):
@@ -706,7 +708,8 @@ class NeighborhoodApifyProvider:
         if not self.configured():
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
-        limit = max(1, min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), 5000))
+        requested_limit = max(1, min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), 5000))
+        limit = min(requested_limit, SYNC_MAX_PAID_ITEMS)
         start_url = sahibinden_neighborhood_url(district, neighborhood, filters=filters)
 
         # Maliyet güvenliği:
@@ -725,7 +728,7 @@ class NeighborhoodApifyProvider:
             "clean": "true",
             "format": "json",
             "limit": str(limit),
-            "maxItems": str(limit),
+            "maxItems": str(SYNC_MAX_PAID_ITEMS),
             "maxTotalChargeUsd": f"{SYNC_MAX_CHARGE_USD:.2f}",
             "timeout": str(self.timeout),
         }
@@ -1088,9 +1091,10 @@ th,td{padding:10px 8px;border-bottom:1px solid #eceff3;text-align:left;white-spa
 <div class="card">
 <div class="notice"><strong>Veri sağlayıcı:</strong> PostgreSQL + Search Scraper Pro.
 Normal analiz Apify çalıştırmaz.
-Canlı güncelleme doğrudan seçili mahallenin Sahibinden arama URL'sinden en fazla {{ live_limit }} ilan çeker.
-Fiyat ve m² gibi seçili filtreler mümkün olduğunca Sahibinden URL'sine taşınır; aynı sorgu 1 saat içinde tekrar ücretlendirilmez.
-Tek run sert güvenlik tavanı: ${{ charge_cap }}.</div>
+Canlı güncelleme maliyet-korumalı modda çalışır.
+Tek run en fazla {{ paid_items }} ücretli ilan olayı ve yaklaşık ${{ charge_cap }} toplam Actor maliyeti ile sınırlandırılır.
+Aynı mahalle + aynı filtre sorgusu 1 saat içinde tekrar Apify çalıştırmaz.
+Tarih filtresi kayıtlı PostgreSQL ilanlarının ilan tarihine uygulanır; geçmiş günler ancak veritabanında daha önce toplanmışsa görünür.</div>
 </div>
 
 <form id="pasForm">
@@ -1151,9 +1155,9 @@ Tek run sert güvenlik tavanı: ${{ charge_cap }}.</div>
 </div>
 </details>
 
-<label class="field">Tarih</label>
+<label class="field">İlan Tarihi</label>
 <select name="date_filter">
-<option value="current">Güncel</option>
+<option value="current">Tümü / kayıtlı güncel veri</option>
 <option value="7d">Son 1 hafta</option>
 <option value="30d">Son 1 ay</option>
 <option value="90d">Son 3 ay</option>
@@ -1173,7 +1177,7 @@ Tek run sert güvenlik tavanı: ${{ charge_cap }}.</div>
 <button class="secondary" id="syncButton" type="button">Seçili Mahalleyi Güncelle (Apify)</button>
 
 <div class="small" style="margin-top:10px">
-Güncelleme doğrudan seçili mahallenin Sahibinden arama URL'sine gider. Örneğin 3 sonuç varsa 50 farklı Kadıköy ilanı taranmaz.
+Maliyet koruması açıktır: varsayılan olarak tek çalıştırmada en fazla {{ paid_items }} ücretli sonuç ve yaklaşık ${{ charge_cap }} tavan vardır. Daha yüksek tarama yalnız Railway değişkenleri bilinçli olarak artırılırsa yapılır.
 </div>
 </div>
 </form>
@@ -1442,6 +1446,7 @@ def home():
         version=VERSION,
         live_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
         charge_cap=f"{SYNC_MAX_CHARGE_USD:.2f}",
+        paid_items=SYNC_MAX_PAID_ITEMS,
     )
 
 
@@ -1538,6 +1543,8 @@ def api_sync():
                 updated=0,
                 selected_neighborhood_count=selected_count,
                 cached=True,
+                cost_cap_usd=SYNC_MAX_CHARGE_USD,
+                max_paid_items=SYNC_MAX_PAID_ITEMS,
                 message="Aynı sorgu son 1 saat içinde güncellendi; yeni Apify ücreti oluşturulmadı.",
             )
 
@@ -1597,6 +1604,8 @@ def api_sync():
             actor_input=result["actor_input"],
             start_url=result["start_url"],
             sync_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
+            max_paid_items=SYNC_MAX_PAID_ITEMS,
+            cost_cap_usd=SYNC_MAX_CHARGE_USD,
             cached=False,
             **saved,
         )
@@ -1635,6 +1644,9 @@ def api_provider_status():
         normal_search_uses_apify=False,
         neighborhood_direct_url=True,
         repeat_query_guard_hours=1,
+        max_paid_items=SYNC_MAX_PAID_ITEMS,
+        listing_unit_usd=SYNC_LISTING_UNIT_USD,
+        hard_cost_cap_usd=SYNC_MAX_CHARGE_USD,
     )
 
 
