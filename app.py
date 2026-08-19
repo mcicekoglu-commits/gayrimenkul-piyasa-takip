@@ -36,7 +36,7 @@ app = Flask(__name__)
 #   Bu nedenle Actor ilçe bazında çalışır. Mahalle doğrulaması çıktıdan yapılır.
 # =========================================================
 
-VERSION = "v4.1-exact-neighborhood-costsafe"
+VERSION = "v4.2-wide-scan-hard-cap"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -155,10 +155,10 @@ def env_float(name, default):
     except Exception:
         return default
 
-LIVE_NEIGHBORHOOD_MAX_RESULTS = max(1, min(env_int("PAS_SYNC_MAX_RESULTS", 3), 500))
+LIVE_NEIGHBORHOOD_MAX_RESULTS = max(20, min(env_int("PAS_SCAN_MAX_RESULTS", 100), 500))
 SYNC_MAX_CHARGE_USD = max(0.01, min(env_float("PAS_SYNC_MAX_CHARGE_USD", 0.02), 10.0))
 SYNC_LISTING_UNIT_USD = max(0.0001, env_float("PAS_LISTING_UNIT_USD", 0.00599))
-SYNC_MAX_PAID_ITEMS = max(1, min(LIVE_NEIGHBORHOOD_MAX_RESULTS, int(SYNC_MAX_CHARGE_USD / SYNC_LISTING_UNIT_USD)))
+SYNC_MAX_PAID_ITEMS = max(1, min(env_int("PAS_MAX_PAID_ITEMS", 3), 100))
 
 
 def parse_int(value):
@@ -226,64 +226,22 @@ def slug(value):
 
 
 def sahibinden_neighborhood_url(district, neighborhood, filters=None):
-    """Gerçek Sahibinden SEO mahalle URL'si + kaynak tarafı filtreleri."""
+    """Doğrudan seçili mahalledeki Sahibinden satılık daire arama sayfası."""
     filters = filters or {}
-
-    # Doğrulanan SEO biçimi:
-    # /satilik-daire/istanbul-kadikoy-kosuyolu-kosuyolu-mh.
-    nb = slug(neighborhood)
     base = (
         "https://www.sahibinden.com/satilik-daire/"
-        f"istanbul-{slug(district)}-{nb}-{nb}-mh."
+        f"istanbul-{slug(district)}-{slug(neighborhood)}"
     )
 
-    pairs = []
+    params = {"sorting": "date_desc"}
+    min_price = parse_int(filters.get("min_price"))
+    max_price = parse_int(filters.get("max_price"))
+    if min_price is not None:
+        params["price_min"] = str(min_price)
+    if max_price is not None:
+        params["price_max"] = str(max_price)
 
-    def add(k, v):
-        if v not in (None, ""):
-            pairs.append((k, str(v)))
-
-    # Numeric filters that Sahibinden search URLs accept.
-    add("price_min", parse_int(filters.get("min_price")))
-    add("price_max", parse_int(filters.get("max_price")))
-    add("a24_min", parse_int(filters.get("min_m2")))      # Brüt m²
-    add("a24_max", parse_int(filters.get("max_m2")))
-    add("a107889_min", parse_int(filters.get("net_area_min") or filters.get("net_m2_min")))
-    add("a107889_max", parse_int(filters.get("net_area_max") or filters.get("net_m2_max")))
-
-    # Bina yaşı SAYISAL min/max değildir; Sahibinden bunu kategorik a812 kodlarıyla tutar.
-    # Doğrulanmış seri: 1->40602, 2->40603, 3->40604, 4->40605, 5->40606.
-    # 0 için iki ayrı kategori olabilir; ikisini de dahil ediyoruz.
-    age_min = parse_int(filters.get("building_age_min"))
-    age_max = parse_int(filters.get("building_age_max"))
-    age_codes = {
-        0: ["40600", "40601"],
-        1: ["40602"],
-        2: ["40603"],
-        3: ["40604"],
-        4: ["40605"],
-        5: ["40606"],
-    }
-    if age_min is not None or age_max is not None:
-        lo = 0 if age_min is None else max(0, age_min)
-        hi = 5 if age_max is None else min(5, age_max)
-        if lo <= hi:
-            for age in range(lo, hi + 1):
-                for code in age_codes.get(age, []):
-                    pairs.append(("a812", code))
-
-    # Oda sayısı: yalnız doğrulanmış değerleri kaynağa taşı; diğerleri DB filtresinde kalır.
-    room_codes = {
-        "1+1": "38473",
-        "3+1": "38474",
-    }
-    room = str(filters.get("rooms") or "").strip()
-    if room in room_codes:
-        add("a20", room_codes[room])
-
-    add("sorting", "date_desc")
-
-    return base + ("?" + urlencode(pairs) if pairs else "")
+    return base + "?" + urlencode(params)
 
 
 @dataclass
@@ -716,8 +674,7 @@ class NeighborhoodApifyProvider:
         if not self.configured():
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
-        requested_limit = max(1, min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), 5000))
-        limit = min(requested_limit, SYNC_MAX_PAID_ITEMS)
+        limit = max(20, min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), 500))
         start_url = sahibinden_neighborhood_url(district, neighborhood, filters=filters)
 
         # Maliyet güvenliği:
@@ -726,11 +683,9 @@ class NeighborhoodApifyProvider:
         # - maxResults yalnızca bu mahallenin sonuçlarına uygulanır.
         actor_input = {
             "startUrls": [start_url],
-            "includeDetails": False,
-            "extractPhoneNumbers": False,
+            "enrichment": False,
             "maxResults": limit,
         }
-
         params = {
             "clean": "true",
             "format": "json",
@@ -814,25 +769,9 @@ class NeighborhoodApifyProvider:
             or "İstanbul"
         )
 
-        district = normalize_place(
-            self._pick(item, "district", "districtName", "town", "ilce")
-            or self._pick(raw, "district", "districtName", "town", "ilce")
-            or fallback_district
-        )
+        district = normalize_place(fallback_district)
 
-        quarter = normalize_place(
-            self._pick(item, "quarter", "quarterName")
-            or self._pick(raw, "quarter", "quarterName")
-            or ""
-        )
-
-        actor_neighborhood = normalize_place(
-            self._pick(item, "neighborhood", "neighborhoodName", "mahalle")
-            or self._pick(raw, "neighborhood", "neighborhoodName", "mahalle")
-            or ""
-        )
-
-        neighborhood = quarter or actor_neighborhood or fallback_neighborhood
+        neighborhood = normalize_place(fallback_neighborhood)
 
         # Search Scraper Pro searchSummary'de daha önce doğruladığımız alanlar:
         # a24 = brüt m², a107889 = net m², a20 = oda, a812 = bina yaşı.
@@ -898,36 +837,16 @@ class NeighborhoodApifyProvider:
         )
 
         accepted = []
-        rejected = {
-            "parse": 0,
-            "wrong_city": 0,
-            "wrong_district": 0,
-            "wrong_neighborhood": 0,
-        }
+        rejected = {"parse": 0}
         seen = set()
 
         for raw in raw_items:
             item = self.normalize_item(raw, district, neighborhood)
-
             if not item:
                 rejected["parse"] += 1
                 continue
-
-            if slug(getattr(item, "_city", "")) != "istanbul":
-                rejected["wrong_city"] += 1
-                continue
-
-            if slug(item.district) != slug(district):
-                rejected["wrong_district"] += 1
-                continue
-
-            if slug(item.neighborhood) != slug(neighborhood):
-                rejected["wrong_neighborhood"] += 1
-                continue
-
             if item.id in seen:
                 continue
-
             seen.add(item.id)
             accepted.append(item)
 
@@ -1098,10 +1017,10 @@ th,td{padding:10px 8px;border-bottom:1px solid #eceff3;text-align:left;white-spa
 <div class="card">
 <div class="notice"><strong>Veri sağlayıcı:</strong> PostgreSQL + Search Scraper Pro.
 Normal analiz Apify çalıştırmaz.
-Canlı güncelleme maliyet-korumalı modda çalışır.
-Tek run en fazla {{ paid_items }} ücretli ilan olayı ve yaklaşık ${{ charge_cap }} toplam Actor maliyeti ile sınırlandırılır.
+Canlı güncelleme geniş tarama + sert maliyet tavanı ile çalışır.
+Actor kaynakta en fazla {{ live_limit }} sonucu tarayabilir; ücretlendirilebilecek dataset item sayısı {{ paid_items }} ve toplam run maliyeti yaklaşık ${{ charge_cap }} ile sınırlandırılır.
 Aynı mahalle + aynı filtre sorgusu 1 saat içinde tekrar Apify çalıştırmaz.
-Tarih filtresi kayıtlı PostgreSQL ilanlarının ilan tarihine uygulanır; geçmiş günler ancak veritabanında daha önce toplanmışsa görünür.</div>
+Tarih filtresi taranan sonuçların ilan tarihine uygulanır; geniş tarama ilk birkaç ilanda eşleşme yok diye yanlış 0 sonucu üretmemek içindir.</div>
 </div>
 
 <form id="pasForm">
@@ -1184,7 +1103,7 @@ Tarih filtresi kayıtlı PostgreSQL ilanlarının ilan tarihine uygulanır; geç
 <button class="secondary" id="syncButton" type="button">Seçili Mahalleyi Güncelle (Apify)</button>
 
 <div class="small" style="margin-top:10px">
-Maliyet koruması açıktır: varsayılan olarak tek çalıştırmada en fazla {{ paid_items }} ücretli sonuç ve yaklaşık ${{ charge_cap }} tavan vardır. Daha yüksek tarama yalnız Railway değişkenleri bilinçli olarak artırılırsa yapılır.
+Sistem geniş sonucu tarar ama ücret tavanı ayrıdır: en fazla {{ live_limit }} sonuç taranır, ücretli dataset item sınırı {{ paid_items }} ve run maliyet tavanı yaklaşık ${{ charge_cap }}. Daha yüksek tarama yalnız Railway değişkenleri bilinçli olarak artırılırsa yapılır.
 </div>
 </div>
 </form>
