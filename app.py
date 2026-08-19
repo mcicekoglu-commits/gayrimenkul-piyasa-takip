@@ -36,7 +36,7 @@ app = Flask(__name__)
 #   Bu nedenle Actor ilçe bazında çalışır. Mahalle doğrulaması çıktıdan yapılır.
 # =========================================================
 
-VERSION = "v4.2-wide-scan-hard-cap"
+VERSION = "v4.3-incremental-safe"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -155,10 +155,10 @@ def env_float(name, default):
     except Exception:
         return default
 
-LIVE_NEIGHBORHOOD_MAX_RESULTS = max(20, min(env_int("PAS_SCAN_MAX_RESULTS", 100), 500))
-SYNC_MAX_CHARGE_USD = max(0.01, min(env_float("PAS_SYNC_MAX_CHARGE_USD", 0.02), 10.0))
+LIVE_NEIGHBORHOOD_MAX_RESULTS = max(1, min(env_int("PAS_SYNC_MAX_RESULTS", 3), 20))
+SYNC_MAX_CHARGE_USD = max(0.02, min(env_float("PAS_SYNC_MAX_CHARGE_USD", 0.025), 1.0))
 SYNC_LISTING_UNIT_USD = max(0.0001, env_float("PAS_LISTING_UNIT_USD", 0.00599))
-SYNC_MAX_PAID_ITEMS = max(1, min(env_int("PAS_MAX_PAID_ITEMS", 3), 100))
+SYNC_MAX_PAID_ITEMS = max(1, min(env_int("PAS_MAX_PAID_ITEMS", 3), LIVE_NEIGHBORHOOD_MAX_RESULTS))
 
 
 def parse_int(value):
@@ -226,22 +226,18 @@ def slug(value):
 
 
 def sahibinden_neighborhood_url(district, neighborhood, filters=None):
-    """Doğrudan seçili mahalledeki Sahibinden satılık daire arama sayfası."""
-    filters = filters or {}
-    base = (
+    """
+    Sahibinden'in mahalle sonuç sayfası.
+    Örnek:
+      https://www.sahibinden.com/satilik-daire/
+      istanbul-kadikoy-erenkoy-erenkoy-mh.
+    """
+    d = slug(district)
+    n = slug(neighborhood)
+    return (
         "https://www.sahibinden.com/satilik-daire/"
-        f"istanbul-{slug(district)}-{slug(neighborhood)}"
+        f"istanbul-{d}-{n}-{n}-mh."
     )
-
-    params = {"sorting": "date_desc"}
-    min_price = parse_int(filters.get("min_price"))
-    max_price = parse_int(filters.get("max_price"))
-    if min_price is not None:
-        params["price_min"] = str(min_price)
-    if max_price is not None:
-        params["price_max"] = str(max_price)
-
-    return base + "?" + urlencode(params)
 
 
 @dataclass
@@ -674,7 +670,7 @@ class NeighborhoodApifyProvider:
         if not self.configured():
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
-        limit = max(20, min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), 500))
+        limit = max(1, min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), LIVE_NEIGHBORHOOD_MAX_RESULTS))
         start_url = sahibinden_neighborhood_url(district, neighborhood, filters=filters)
 
         # Maliyet güvenliği:
@@ -691,7 +687,7 @@ class NeighborhoodApifyProvider:
             "format": "json",
             "limit": str(limit),
             "maxItems": str(SYNC_MAX_PAID_ITEMS),
-            "maxTotalChargeUsd": f"{SYNC_MAX_CHARGE_USD:.2f}",
+            "maxTotalChargeUsd": f"{SYNC_MAX_CHARGE_USD:.3f}",
             "timeout": str(self.timeout),
         }
 
@@ -1314,11 +1310,19 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
   const result=await postJson("/api/sync",syncPayload), data=result.data;
   if(!result.ok||!data.ok)throw new Error(data.error||("Güncelleme başarısız. HTTP "+result.status));
 
-  showSuccess(
-   `${district} · ${neighborhood}: doğrudan mahalle aramasından ${data.raw_received} ilan geldi; `+
-   `${data.accepted} ilan kabul edildi. ${data.new} yeni, ${data.updated} güncellendi. `+
-   `PostgreSQL'de bu mahalle için toplam ${data.selected_neighborhood_count} ilan var.`
-  );
+  if(data.cached){
+   showSuccess(
+    `${district} · ${neighborhood}: son 1 saat içinde zaten güncellendi. `+
+    `Yeni Apify çalıştırılmadı; yeni ücret oluşmadı. `+
+    `Seçili filtrelerde kayıtlı ${data.selected_neighborhood_count} ilan var.`
+   );
+  }else{
+   showSuccess(
+    `${district} · ${neighborhood}: en yeni ${data.raw_received} ilan kontrol edildi. `+
+    `${data.new} yeni kayıt, ${data.updated} mevcut kayıt güncellendi. `+
+    `Seçili filtrelerde PostgreSQL'de ${data.selected_neighborhood_count} ilan var.`
+   );
+  }
 
   // Güncelleme başarılı olunca aynı seçim ve filtrelerle
   // PostgreSQL sonuçlarını otomatik olarak ekrana getir.
@@ -1448,9 +1452,10 @@ def api_sync():
             "gross_m2_max": payload.get("gross_m2_max", ""),
         }
 
-        query_key = make_query_key(district, neighborhood, filters)
+        # Live sync ücret anahtarı yalnız lokasyondur.
+        # Filtre değiştirerek aynı mahalle için tekrar ücret oluşturulamaz.
+        query_key = f"live::{slug(district)}::{slug(neighborhood)}"
 
-        # Aynı sorguya art arda basılırsa 1 saat boyunca yeni Apify run başlatma.
         if recently_synced_query(query_key, hours=1):
             selected_filters = {
                 **filters,
@@ -1471,29 +1476,29 @@ def api_sync():
                 cached=True,
                 cost_cap_usd=SYNC_MAX_CHARGE_USD,
                 max_paid_items=SYNC_MAX_PAID_ITEMS,
-                message="Aynı sorgu son 1 saat içinde güncellendi; yeni Apify ücreti oluşturulmadı.",
+                message=(
+                    "Bu mahalle son 1 saat içinde zaten güncellendi. "
+                    "Yeni Apify run başlatılmadı; yeni ücret oluşmadı."
+                ),
             )
 
         result = APIFY.sync_neighborhood(
             district,
             neighborhood,
-            filters=filters,
+            filters=None,
             max_results=LIVE_NEIGHBORHOOD_MAX_RESULTS,
         )
 
-        # URL'de uygulanamayan filtreleri burada son kez kontrol et.
-        accepted = [
-            item for item in result["accepted"]
-            if listing_matches_filters(item, filters)
-        ]
+        # Canlı sonuçlar UI filtrelerinden ÖNCE kaydedilir.
+        # Böylece summary çıktısında tarih/bina yaşı/net m² eksikse
+        # gerçek ilan yanlışlıkla "0 sonuç" diye atılmaz.
+        accepted = result["accepted"]
 
         if not accepted:
-            save_query_sync(query_key, district, neighborhood, result["raw_count"])
-
             message = (
-                f"{district} / {neighborhood}: Actor {result['raw_count']} ücretli/ham sonuç döndürdü; "
-                "PAS doğrulamasından sonra kayıt oluşmadı. Bu, Sahibinden’de ilan olmadığı anlamına gelmez. "
-                "Aynı sorguya 1 saat içinde tekrar basılırsa yeni Apify run başlatılmayacak."
+                f"{district} · {neighborhood}: Actor 0 ilan döndürdü. "
+                "Bu sonuç 'Sahibinden'de ilan yok' kabul edilmedi. "
+                "PostgreSQL kayıtları değiştirilmedi."
             )
             record_sync_state(district, neighborhood, 0, message)
 
@@ -1504,7 +1509,8 @@ def api_sync():
                 rejected=result["rejected"],
                 actor_input=result["actor_input"],
                 start_url=result["start_url"],
-            ), 409
+                cost_cap_usd=SYNC_MAX_CHARGE_USD,
+            ), 502
 
         saved = save_listings_to_db(accepted)
         save_query_sync(query_key, district, neighborhood, result["raw_count"])
@@ -1516,7 +1522,12 @@ def api_sync():
         }
         selected_count = len(load_listings_from_db(selected_filters))
 
-        record_sync_state(district, neighborhood, selected_count, "")
+        record_sync_state(
+            district,
+            neighborhood,
+            result_count=len(accepted),
+            error="",
+        )
 
         return jsonify(
             ok=True,
@@ -1539,16 +1550,6 @@ def api_sync():
         return jsonify(ok=False, error=str(exc)), 400
 
     except Exception as exc:
-        try:
-            record_sync_state(
-                str(payload.get("district") or ""),
-                str(payload.get("neighborhood") or ""),
-                0,
-                str(exc)[:700],
-            )
-        except Exception:
-            pass
-
         return jsonify(
             ok=False,
             error=f"Mahalle güncellemesi yapılamadı: {exc}. PostgreSQL kayıtları etkilenmedi.",
@@ -1567,6 +1568,8 @@ def api_provider_status():
         enrichment=False,
         max_total_charge_usd=SYNC_MAX_CHARGE_USD,
         normal_search_uses_apify=False,
+        incremental_newest_only=True,
+        sync_cache_hours=1,
         neighborhood_direct_url=True,
         repeat_query_guard_hours=1,
         max_paid_items=SYNC_MAX_PAID_ITEMS,
