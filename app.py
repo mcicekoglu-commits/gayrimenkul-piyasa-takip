@@ -33,7 +33,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.6-price-verified-mobile"
+VERSION = "v4.9-stable-mobile"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -1228,6 +1228,103 @@ th{font-size:11px}
  .metrics{grid-template-columns:1fr 1fr}
  .grid,.nb-grid{grid-template-columns:1fr 1fr}
 }
+
+/* ===== HLF PAS v4.9 compact mobile layout ===== */
+body{padding:7px}
+.container{max-width:920px}
+.header{margin:1px 2px 5px;gap:8px}
+h1{font-size:28px}
+.subtitle{font-size:11px}
+.card{padding:8px;margin-bottom:7px;border-radius:13px}
+.topline{margin-bottom:6px}
+.title{font-size:16px}
+.segmented{gap:3px}
+.seg span{padding:5px 7px;font-size:11px;border-radius:8px}
+
+.favorite{
+  background:transparent;
+  border:0;
+  padding:0;
+  margin:0 0 6px;
+  display:block;
+}
+#favoriteDistrictLabel,#favoriteNeighborhoodLabel{display:none!important}
+#favoriteDistricts{
+  background:#f6fbff;
+  border:1px solid #e8f2fb;
+  border-radius:11px;
+  padding:5px;
+  margin-bottom:5px;
+}
+#favoriteNeighborhoods{
+  background:#fffdf8;
+  border:1px solid #f4ecd8;
+  border-radius:11px;
+  padding:5px;
+}
+.favorite-section{
+  display:grid!important;
+  grid-template-columns:repeat(3,minmax(0,1fr))!important;
+  gap:3px!important;
+}
+.chip{
+  padding:3px 4px!important;
+  gap:2px!important;
+  border-radius:8px!important;
+  font-size:11.5px!important;
+  min-height:29px;
+}
+.chip input{width:14px!important;height:14px!important}
+.star{font-size:16px!important}
+
+.chip:has(input:checked),
+.rowitem:has(input:checked){
+  background:#effaf1!important;
+  border-color:#76c98d!important;
+}
+.chip:has(input:checked) input,
+.rowitem:has(input:checked) input{accent-color:#20aa50}
+
+#districtDetails{margin-top:5px}
+details{margin-top:5px;border-radius:10px}
+summary{padding:6px 8px;font-size:12.5px}
+
+.nb-list{padding:0 4px 5px!important}
+.nb-grid{
+  grid-template-columns:repeat(3,minmax(0,1fr))!important;
+  gap:2px!important;
+}
+.nb-grid .rowitem{
+  gap:1px!important;
+  padding:2px 3px!important;
+  min-height:27px!important;
+  border-radius:7px!important;
+}
+.nb-grid .rowitem input{width:13px!important;height:13px!important}
+.nb-grid .rowname{font-size:10.7px!important;line-height:1!important}
+.nb-grid .star{font-size:14px!important}
+
+.grid{gap:3px;padding:0 4px 5px}
+.grid .rowitem{padding:4px;min-height:29px}
+.grid .rowname{font-size:11.5px}
+
+.quickbar{gap:4px;margin-bottom:4px}
+.field{font-size:10px;margin-bottom:2px}
+input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
+.filter-grid{gap:4px}
+.primary,.secondary{padding:10px;font-size:13px}
+.actions-sticky{bottom:6px;padding:3px;gap:4px;border-radius:10px}
+.info-bottom{margin-top:7px}
+
+@media(max-width:600px){
+  body{padding:6px}
+  h1{font-size:27px}
+  .header{margin-bottom:4px}
+  .card{padding:7px}
+  .favorite-section{grid-template-columns:repeat(3,minmax(0,1fr))!important}
+  .nb-grid{grid-template-columns:repeat(3,minmax(0,1fr))!important}
+}
+
 </style>
 </head>
 <body>
@@ -1251,8 +1348,7 @@ th{font-size:11px}
   </div>
 
   <div class="favorite">
-    <div class="favorite-title">★ Favoriler</div>
-    <div id="favoriteDistrictLabel" class="favorite-label">İlçeler</div>
+        <div id="favoriteDistrictLabel" class="favorite-label">İlçeler</div>
     <div id="favoriteDistricts" class="favorite-section"></div>
     <div id="favoriteNeighborhoodLabel" class="favorite-label">Mahalleler</div>
     <div id="favoriteNeighborhoods" class="favorite-section"></div>
@@ -1311,7 +1407,7 @@ th{font-size:11px}
 </div>
 
 <div class="actions-sticky">
-  <button class="primary" id="searchButton" type="submit">İlanları Ara</button>
+  <button class="primary" id="searchButton" type="submit">Kayıtlı İlanları Ara</button>
   <button class="secondary" id="syncButton" type="button">Canlı Güncelle</button>
 </div>
 
@@ -1367,7 +1463,7 @@ Fiyat, Net TL/m² ve Brüt TL/m² PAS tarafından gerçek ilan fiyatı ve gerçe
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_state_v46";
+const STATE_KEY="hlf_pas_state_v49";
 
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
