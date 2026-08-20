@@ -33,7 +33,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.11-data-verified"
+VERSION = "v4.12-location-guard-fix"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -417,52 +417,61 @@ def normalize_compare(value):
 
 def item_matches_requested_location(item, raw, district, neighborhood):
     """
-    Yanlış şehir/ilçe/mahalle ilanlarının PAS'a Göztepe/Kadıköy diye yazılmasını engeller.
-    Search Scraper Pro sonucu hedef konumla uyuşmuyorsa ilan reddedilir.
+    Search Scraper Pro sonucunun hedef konumla uyuşup uyuşmadığını denetler.
+
+    Açık district / neighborhood alanları varsa bunlar hedef ile eşleşmek zorundadır.
+    Açık city alanı varsa İstanbul olmak zorundadır.
+    Adres tek başına kullanıldığında eksik yazılabileceği için sadece ek doğrulama olarak
+    değerlendirilir; yanlış pozitif üretmemek için adres zorunlu eşleşme değildir.
     """
     sources = [x for x in (item, raw) if isinstance(x, dict)]
 
     district_values = []
     neighborhood_values = []
-    address_values = []
     city_values = []
+    address_values = []
 
     for source in sources:
         for key in ("district", "districtName"):
-            if source.get(key):
+            if source.get(key) not in (None, ""):
                 district_values.append(str(source.get(key)))
+
         for key in ("neighborhood", "neighbourhood", "neighborhoodName", "quarter"):
-            if source.get(key):
+            if source.get(key) not in (None, ""):
                 neighborhood_values.append(str(source.get(key)))
-        for key in ("address", "location", "locationText"):
-            if source.get(key):
-                address_values.append(str(source.get(key)))
+
         for key in ("city", "cityName"):
-            if source.get(key):
+            if source.get(key) not in (None, ""):
                 city_values.append(str(source.get(key)))
 
-    wanted_d = normalize_compare(district)
-    wanted_n = normalize_compare(neighborhood)
+        for key in ("address", "location", "locationText", "addressNormalized"):
+            if source.get(key) not in (None, ""):
+                address_values.append(str(source.get(key)))
 
-    # Açık district alanı varsa mutlaka hedef ilçe ile eşleşmeli.
-    if district_values:
-        if not any(normalize_compare(v) == wanted_d for v in district_values):
-            return False
+    wanted_d = slug(district)
+    wanted_n = slug(neighborhood)
 
-    # Açık neighborhood alanı varsa mutlaka hedef mahalle ile eşleşmeli.
-    if neighborhood_values:
-        if not any(normalize_compare(v) == wanted_n for v in neighborhood_values):
-            return False
-
-    # Açık mahalle alanı yoksa adres içinde ilçe+mahalle izini ara.
-    if not neighborhood_values and address_values:
-        joined = " ".join(normalize_compare(v) for v in address_values)
-        if wanted_n not in joined or wanted_d not in joined:
-            return False
-
-    # Şehir alanı varsa İstanbul olmalı.
     if city_values:
-        if not any(normalize_compare(v) == "istanbul" for v in city_values):
+        if not any(slug(v) == "istanbul" for v in city_values):
+            return False
+
+    if district_values:
+        if not any(slug(v) == wanted_d for v in district_values):
+            return False
+
+    if neighborhood_values:
+        if not any(slug(v) == wanted_n for v in neighborhood_values):
+            return False
+
+    # Eğer açık district/neighborhood alanı yok ama adres hedef ilçe/mahalle dışında
+    # açıkça başka bir konum gösteriyorsa reddet. Adres eksikse reddetme.
+    if not district_values and not neighborhood_values and address_values:
+        normalized_addresses = [slug(v) for v in address_values]
+        has_target_hint = any(
+            wanted_d in a or wanted_n in a or "istanbul" in a
+            for a in normalized_addresses
+        )
+        if not has_target_hint:
             return False
 
     return True
@@ -1005,11 +1014,6 @@ class NeighborhoodApifyProvider:
             return None
         raw = item.get("rawSummary") if isinstance(item.get("rawSummary"), dict) else {}
 
-        # Hedef dışı ilanı ASLA seçili mahalle adına yazma.
-        if not item_matches_requested_location(
-            item, raw, fallback_district, fallback_neighborhood
-        ):
-            return None
         containers = [item, raw]
         wanted = {slug(x) for x in names}
 
@@ -1083,6 +1087,13 @@ class NeighborhoodApifyProvider:
             return None
 
         raw = item.get("rawSummary") if isinstance(item.get("rawSummary"), dict) else {}
+
+        # Hedef dışı ilanı ASLA seçili mahalle adına yazma.
+        # Burada fallback_district / fallback_neighborhood gerçekten tanımlıdır.
+        if not item_matches_requested_location(
+            item, raw, fallback_district, fallback_neighborhood
+        ):
+            return None
 
         listing_url = str(
             self._pick(item, "url", "listingUrl", "href", "sourceUrl")
@@ -1619,7 +1630,7 @@ Fiyat, Net TL/m² ve Brüt TL/m² PAS tarafından gerçek ilan fiyatı ve gerçe
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_state_v411";
+const STATE_KEY="hlf_pas_state_v412";
 
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
