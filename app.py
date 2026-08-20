@@ -33,7 +33,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.9-stable-mobile"
+VERSION = "v4.10-live-safe"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -147,11 +147,25 @@ def env_int(name, default):
         return default
 
 
+def env_float(name, default):
+    try:
+        return float(os.environ.get(name, str(default)) or default)
+    except Exception:
+        return default
+
+
 LIVE_NEIGHBORHOOD_MAX_RESULTS = max(
     1, min(env_int("PAS_SYNC_MAX_RESULTS", 20), 200)
 )
 SYNC_CACHE_HOURS = max(
     1, min(env_int("PAS_SYNC_CACHE_HOURS", 6), 72)
+)
+
+
+# Bir canlı güncellemenin toplam Apify maliyetine üst sınır.
+# Search Scraper Pro 20 özet ilan için normalde bunun çok altında kalmalıdır.
+APIFY_MAX_TOTAL_CHARGE_USD = max(
+    0.10, min(env_float("PAS_APIFY_MAX_TOTAL_CHARGE_USD", 0.25), 2.00)
 )
 
 
@@ -226,7 +240,15 @@ def slug(value):
 
 
 def sahibinden_neighborhood_url(district, neighborhood, filters=None):
-    filters = filters or {}
+    """
+    HLF PAS v4.10:
+    Sahibinden'in gerçek mahalle SEO URL'sini üretir.
+
+    ÖNEMLİ:
+    Tarih/fiyat gibi doğrulanmamış query parametrelerini URL'ye eklemiyoruz.
+    Bunlar Actor'ın mahalle sayfasını geniş kategori gibi yorumlamasına yol açabiliyor.
+    Filtreleme PostgreSQL/PAS tarafında yapılır.
+    """
     path_overrides = {
         "Sahrayıcedit": "sahrayi-cedit",
         "Küçükyalı Merkez": "kucukyali-merkez",
@@ -242,29 +264,59 @@ def sahibinden_neighborhood_url(district, neighborhood, filters=None):
         "Fevzi Çakmak": "fevzi-cakmak",
         "Petrol İş": "petrol-is",
     }
-    nb = path_overrides.get(neighborhood, slug(neighborhood))
-    base = (
+
+    # "(Bölge)" kayıtları mahalle değildir; yanlış/geniş aramaya gitmesin.
+    if "(Bölge)" in str(neighborhood):
+        raise ValueError(
+            f"{neighborhood} bir mahalle değil, bölge kaydıdır. "
+            "Canlı güncelleme için gerçek bir mahalle seçin."
+        )
+
+    d = slug(district)
+    n = path_overrides.get(neighborhood, slug(neighborhood))
+
+    if not d or not n:
+        raise ValueError("İlçe/mahalle URL'si üretilemedi.")
+
+    return (
         "https://www.sahibinden.com/satilik-daire/"
-        f"istanbul-{slug(district)}-{nb}-{nb}-mh."
+        f"istanbul-{d}-{n}-{n}-mh.?sorting=date_desc"
     )
 
-    # Tarih filtresi aramanın kapsadığı dönemi belirler.
-    # Sonuç adedini azaltan ayrı bir mantık değildir.
-    params = {"sorting": "date_desc"}
-    date_map = {"7d": "7days", "30d": "30days", "90d": "90days"}
-    native_date = date_map.get(str(filters.get("date_filter") or ""))
-    if native_date:
-        params["date"] = native_date
 
-    min_price = parse_int(filters.get("min_price"))
-    max_price = parse_int(filters.get("max_price"))
-    if min_price is not None:
-        params["price_min"] = str(min_price)
-    if max_price is not None:
-        params["price_max"] = str(max_price)
+def validate_live_start_url(url, district, neighborhood):
+    """
+    Apify çağrısından ÖNCE URL'nin gerçekten seçilen ilçe+mahalleyi
+    hedeflediğini kontrol eder. Uyuşmazsa ücretli Actor hiç çalışmaz.
+    """
+    value = str(url or "").strip()
+    parsed = urlparse(value)
 
-    return base + "?" + urlencode(params)
+    if (parsed.hostname or "").lower() not in {"www.sahibinden.com", "sahibinden.com"}:
+        raise ValueError("Canlı güncelleme URL alan adı geçersiz.")
 
+    if not parsed.path.startswith("/satilik-daire/"):
+        raise ValueError("Canlı güncelleme URL'si satılık daire sayfası değil.")
+
+    path = parsed.path.strip("/").casefold()
+    d = slug(district)
+    n = slug(neighborhood)
+
+    # path_overrides ile üretilmiş mahalle slug'ını URL'nin kendisinden çıkarıp
+    # district + '-...-...-mh.' yapısını kontrol ediyoruz.
+    if f"istanbul-{d}-" not in path or not path.endswith("-mh."):
+        raise ValueError(
+            "Mahalle URL doğrulaması başarısız. Apify çalıştırılmadı; ücret oluşmadı."
+        )
+
+    # URL'de mahalle segmenti iki kez yer almalı (Sahibinden SEO formatı).
+    tail = path.split(f"istanbul-{d}-", 1)[1]
+    if not re.match(r"^.+-.+-mh\.$", tail):
+        raise ValueError(
+            "Mahalle URL kapsamı yeterince dar değil. Apify çalıştırılmadı."
+        )
+
+    return True
 
 def normalize_listing_date(value):
     raw = str(value or "").strip()
@@ -828,6 +880,17 @@ class NeighborhoodApifyProvider:
                 detail = exc.read().decode("utf-8", errors="ignore")[:1500]
             except Exception:
                 pass
+
+            low = detail.casefold()
+            if "maximum cost" in low or "usage limit" in low or "aborted" in low:
+                raise RuntimeError(
+                    "Apify çalışma limiti nedeniyle Actor durduruldu. "
+                    f"PAS bu run için enrichment kapalı ve maksimum maliyet "
+                    f"${APIFY_MAX_TOTAL_CHARGE_USD:.2f} olarak ayarlı. "
+                    "Apify aylık kullanım limiti bu tutarın altındaysa Canlı Güncelle çalışmaz. "
+                    f"Teknik ayrıntı: HTTP {exc.code}: {detail}"
+                ) from exc
+
             raise RuntimeError(f"Apify HTTP {exc.code}: {detail}") from exc
         except URLError as exc:
             raise RuntimeError(f"Apify bağlantı hatası: {exc.reason}") from exc
@@ -884,10 +947,15 @@ class NeighborhoodApifyProvider:
         limit = max(1, min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), 200))
         start_url = sahibinden_neighborhood_url(district, neighborhood, filters=filters)
 
+        # Ücretli çağrıdan önce kapsam doğrulaması.
+        validate_live_start_url(start_url, district, neighborhood)
+
+        # Güncel Search Scraper Pro şeması:
+        # enrichment açık bırakılırsa varsayılan TRUE olabilir ve maliyet artar.
+        # Bu nedenle açıkça FALSE gönderiyoruz.
         actor_input = {
             "startUrls": [start_url],
-            "includeDetails": False,
-            "extractPhoneNumbers": False,
+            "enrichment": False,
             "maxResults": limit,
         }
 
@@ -896,6 +964,7 @@ class NeighborhoodApifyProvider:
             "format": "json",
             "limit": str(limit),
             "maxItems": str(limit),
+            "maxTotalChargeUsd": f"{APIFY_MAX_TOTAL_CHARGE_USD:.2f}",
             "timeout": str(self.timeout),
         }
 
@@ -1451,7 +1520,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
     <summary>Veri sağlayıcı ve çalışma bilgisi</summary>
     <div class="notice" style="margin:0 8px 9px"><strong>Veri sağlayıcı:</strong> PostgreSQL + Search Scraper Pro.
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
-Canlı güncelleme yalnız seçili mahalleyi çalıştırır; telefon/detay enrichment kapalıdır.
+Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
 Canlı güncellemede varsayılan sonuç sınırı {{ live_limit }}'dir.
 Fiyat, Net TL/m² ve Brüt TL/m² PAS tarafından gerçek ilan fiyatı ve gerçek m² alanlarından yeniden hesaplanır; kaynağın hazır m² fiyatı kullanılmaz.</div>
@@ -1463,7 +1532,7 @@ Fiyat, Net TL/m² ve Brüt TL/m² PAS tarafından gerçek ilan fiyatı ve gerçe
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_state_v49";
+const STATE_KEY="hlf_pas_state_v410";
 
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
@@ -2040,6 +2109,9 @@ def api_provider_status():
         normal_search_uses_apify=False,
         neighborhood_direct_url=True,
         repeat_query_guard_hours=SYNC_CACHE_HOURS,
+        apify_enrichment=False,
+        apify_max_total_charge_usd=APIFY_MAX_TOTAL_CHARGE_USD,
+        strict_neighborhood_url_guard=True,
         price_source="verified listing sale price",
         net_m2_price_formula="price / net_m2",
         gross_m2_price_formula="price / gross_m2",
