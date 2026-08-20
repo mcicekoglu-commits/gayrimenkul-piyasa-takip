@@ -33,7 +33,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.10-live-safe"
+VERSION = "v4.11-data-verified"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -410,6 +410,64 @@ def valid_listing_url(url, expected_id=None):
     return True
 
 
+
+def normalize_compare(value):
+    return slug(value or "")
+
+
+def item_matches_requested_location(item, raw, district, neighborhood):
+    """
+    Yanlış şehir/ilçe/mahalle ilanlarının PAS'a Göztepe/Kadıköy diye yazılmasını engeller.
+    Search Scraper Pro sonucu hedef konumla uyuşmuyorsa ilan reddedilir.
+    """
+    sources = [x for x in (item, raw) if isinstance(x, dict)]
+
+    district_values = []
+    neighborhood_values = []
+    address_values = []
+    city_values = []
+
+    for source in sources:
+        for key in ("district", "districtName"):
+            if source.get(key):
+                district_values.append(str(source.get(key)))
+        for key in ("neighborhood", "neighbourhood", "neighborhoodName", "quarter"):
+            if source.get(key):
+                neighborhood_values.append(str(source.get(key)))
+        for key in ("address", "location", "locationText"):
+            if source.get(key):
+                address_values.append(str(source.get(key)))
+        for key in ("city", "cityName"):
+            if source.get(key):
+                city_values.append(str(source.get(key)))
+
+    wanted_d = normalize_compare(district)
+    wanted_n = normalize_compare(neighborhood)
+
+    # Açık district alanı varsa mutlaka hedef ilçe ile eşleşmeli.
+    if district_values:
+        if not any(normalize_compare(v) == wanted_d for v in district_values):
+            return False
+
+    # Açık neighborhood alanı varsa mutlaka hedef mahalle ile eşleşmeli.
+    if neighborhood_values:
+        if not any(normalize_compare(v) == wanted_n for v in neighborhood_values):
+            return False
+
+    # Açık mahalle alanı yoksa adres içinde ilçe+mahalle izini ara.
+    if not neighborhood_values and address_values:
+        joined = " ".join(normalize_compare(v) for v in address_values)
+        if wanted_n not in joined or wanted_d not in joined:
+            return False
+
+    # Şehir alanı varsa İstanbul olmalı.
+    if city_values:
+        if not any(normalize_compare(v) == "istanbul" for v in city_values):
+            return False
+
+    return True
+
+
 # =========================================================
 # PRICE EXTRACTION / VALIDATION
 # =========================================================
@@ -428,36 +486,54 @@ def _price_candidate(mapping, *keys):
 
 def extract_real_price(item, raw):
     """
-    Hazır m² fiyatı veya genel 'amount' alanını ilan fiyatı sanmamak için
-    yalnız satış fiyatını ifade eden güçlü alanları kullanır.
+    Satış fiyatını doğrudan ilan özetindeki formattedPrice alanından alır.
+    Hazır m² fiyatı veya belirsiz 'amount' alanları kullanılmaz.
     """
-    candidates = []
-
-    # Önce en açık/özgül fiyat alanları.
     for source in (item, raw):
         if not isinstance(source, dict):
             continue
-        for keys in (
-            ("salePrice",),
-            ("formattedPrice",),
-            ("priceValue",),
-            ("price",),
-            ("listingPrice",),
-            ("classifiedPrice",),
-        ):
-            value = _price_candidate(source, *keys)
-            if value:
-                candidates.append(value)
 
-    if not candidates:
+        # Search Scraper Pro'da gerçek satış fiyatı.
+        formatted = source.get("formattedPrice")
+        if formatted not in (None, ""):
+            value = parse_int(formatted)
+            if value and value > 0:
+                return value
+
+        # Güvenli yedek alanlar.
+        for key in ("salePrice", "priceValue", "listingPrice", "classifiedPrice", "price"):
+            if source.get(key) not in (None, ""):
+                value = parse_int(source.get(key))
+                if value and value > 0:
+                    return value
+
+    return None
+
+
+def parse_building_age(value):
+    """
+    '11-15 arası' gibi aralıkları yanlışlıkla 1115 olarak okumaz.
+    Kesin sayı varsa sayı, aralık varsa alt sınır döndürür.
+    """
+    if value in (None, ""):
         return None
+    if isinstance(value, (int, float)):
+        return int(value)
 
-    # Aynı verinin farklı formatlarda tekrarı varsa en sık görüleni tercih et.
-    counts = {}
-    for value in candidates:
-        counts[value] = counts.get(value, 0) + 1
-    candidates.sort(key=lambda x: (counts[x], x), reverse=True)
-    return candidates[0]
+    text = str(value).strip().casefold()
+
+    m = re.search(r"(\d+)\s*[-–]\s*(\d+)", text)
+    if m:
+        return int(m.group(1))
+
+    m = re.search(r"\d+", text)
+    if m:
+        return int(m.group(0))
+
+    if "0-4" in text or "0 - 4" in text:
+        return 0
+
+    return None
 
 
 def valid_area(gross_m2, net_m2):
@@ -928,6 +1004,12 @@ class NeighborhoodApifyProvider:
         if not isinstance(item, dict):
             return None
         raw = item.get("rawSummary") if isinstance(item.get("rawSummary"), dict) else {}
+
+        # Hedef dışı ilanı ASLA seçili mahalle adına yazma.
+        if not item_matches_requested_location(
+            item, raw, fallback_district, fallback_neighborhood
+        ):
+            return None
         containers = [item, raw]
         wanted = {slug(x) for x in names}
 
@@ -1062,6 +1144,11 @@ class NeighborhoodApifyProvider:
 
         gross_m2, net_m2 = valid_area(gross_m2, net_m2)
 
+        # Brüt/net alanlardan ikisi de yoksa veya fiziksel eşleşme güvenilir değilse
+        # ilan yanlış m² fiyatı üretmesin.
+        if gross_m2 is None and net_m2 is None:
+            return None
+
         rooms = str(
             self._pick(item, "rooms", "roomCount", "room", "roomInfo")
             or self._pick(raw, "rooms", "roomCount", "room", "roomInfo")
@@ -1070,7 +1157,7 @@ class NeighborhoodApifyProvider:
             or ""
         ).strip()
 
-        building_age = parse_int(
+        building_age = parse_building_age(
             self._pick(item, "buildingAge", "building_age", "buildingAgeYears", "ageOfBuilding")
             or self._pick(raw, "buildingAge", "building_age", "buildingAgeYears", "ageOfBuilding")
             or self._named_attribute(item, "Bina Yaşı", "Bina Yasi")
@@ -1532,7 +1619,7 @@ Fiyat, Net TL/m² ve Brüt TL/m² PAS tarafından gerçek ilan fiyatı ve gerçe
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_state_v410";
+const STATE_KEY="hlf_pas_state_v411";
 
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
@@ -2112,7 +2199,8 @@ def api_provider_status():
         apify_enrichment=False,
         apify_max_total_charge_usd=APIFY_MAX_TOTAL_CHARGE_USD,
         strict_neighborhood_url_guard=True,
-        price_source="verified listing sale price",
+        strict_output_location_guard=True,
+        price_source="formattedPrice -> verified listing sale price",
         net_m2_price_formula="price / net_m2",
         gross_m2_price_formula="price / gross_m2",
         listing_url_id_validation=True,
