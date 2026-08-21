@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.28-compact-favorite-filters"
+VERSION = "v4.29-floor-filters"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -778,6 +778,8 @@ class Listing:
     rooms: str
     listing_date: str
     building_age: int | None = None
+    total_floors: int | None = None
+    located_floor: str = ""
     property_group: str = "residential"
     location_verified: bool = False
     price_verified: bool = False
@@ -835,6 +837,8 @@ def init_db():
                     rooms TEXT NOT NULL DEFAULT '',
                     listing_date TEXT NOT NULL DEFAULT '',
                     building_age INTEGER,
+                    total_floors INTEGER,
+                    located_floor TEXT NOT NULL DEFAULT '',
                     property_group TEXT NOT NULL DEFAULT 'residential',
                     location_verified BOOLEAN NOT NULL DEFAULT FALSE,
                     price_verified BOOLEAN NOT NULL DEFAULT FALSE,
@@ -846,6 +850,14 @@ def init_db():
                     last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
+            """)
+            cur.execute("""
+                ALTER TABLE pas_listings
+                ADD COLUMN IF NOT EXISTS total_floors INTEGER
+            """)
+            cur.execute("""
+                ALTER TABLE pas_listings
+                ADD COLUMN IF NOT EXISTS located_floor TEXT NOT NULL DEFAULT ''
             """)
             cur.execute("""
                 ALTER TABLE pas_listings
@@ -912,14 +924,14 @@ def save_listings_to_db(listings):
                 cur.execute("""
                     INSERT INTO pas_listings (
                         id,district,neighborhood,title,price,gross_m2,net_m2,
-                        rooms,listing_date,building_age,property_group,
-                        location_verified,price_verified,verification_version,
+                        rooms,listing_date,building_age,total_floors,located_floor,
+                        property_group,location_verified,price_verified,verification_version,
                         source,url,active,
                         first_seen,last_seen,updated_at
                     )
                     VALUES (
-                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                        %s,%s,%s,%s,%s,TRUE,
+                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                        %s,%s,%s,%s,%s,%s,TRUE,
                         NOW(),NOW(),NOW()
                     )
                     ON CONFLICT (id) DO UPDATE SET
@@ -932,6 +944,8 @@ def save_listings_to_db(listings):
                         rooms=CASE WHEN EXCLUDED.rooms<>'' THEN EXCLUDED.rooms ELSE pas_listings.rooms END,
                         listing_date=CASE WHEN EXCLUDED.listing_date<>'' THEN EXCLUDED.listing_date ELSE pas_listings.listing_date END,
                         building_age=COALESCE(EXCLUDED.building_age,pas_listings.building_age),
+                        total_floors=COALESCE(EXCLUDED.total_floors,pas_listings.total_floors),
+                        located_floor=CASE WHEN EXCLUDED.located_floor<>'' THEN EXCLUDED.located_floor ELSE pas_listings.located_floor END,
                         property_group=EXCLUDED.property_group,
                         location_verified=EXCLUDED.location_verified,
                         price_verified=EXCLUDED.price_verified,
@@ -945,6 +959,7 @@ def save_listings_to_db(listings):
                     str(item.id), item.district, item.neighborhood, item.title or "",
                     item.price, item.gross_m2, item.net_m2, item.rooms or "",
                     item.listing_date or "", item.building_age,
+                    item.total_floors, item.located_floor or "",
                     item.property_group or "residential",
                     bool(item.location_verified),
                     bool(item.price_verified),
@@ -1028,6 +1043,9 @@ def make_query_key(district, neighborhood, filters):
         "max_price": str(filters.get("max_price") or ""),
         "building_age_min": str(filters.get("building_age_min") or ""),
         "building_age_max": str(filters.get("building_age_max") or ""),
+        "total_floors_min": str(filters.get("total_floors_min") or ""),
+        "total_floors_max": str(filters.get("total_floors_max") or ""),
+        "located_floor_filter": str(filters.get("located_floor_filter") or ""),
         "date_filter": str(filters.get("date_filter") or "current"),
         "hard_max_results": LIVE_NEIGHBORHOOD_MAX_RESULTS,
     }
@@ -1099,6 +1117,69 @@ def listing_date_is_allowed(listing_date, date_filter):
     return d >= (date.today() - timedelta(days=days))
 
 
+def normalize_floor_text(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    s = slug(raw)
+
+    aliases = {
+        "bodrum": "Bodrum",
+        "zemin": "Zemin/Giriş",
+        "giris": "Zemin/Giriş",
+        "bahce-kati": "Zemin/Giriş",
+        "bahce": "Zemin/Giriş",
+        "yuksek-giris": "Zemin/Giriş",
+        "cati-kati": "Çatı",
+        "cati": "Çatı",
+        "teras-kati": "Çatı",
+        "mustakil": "Müstakil",
+    }
+
+    for key, label in aliases.items():
+        if key in s:
+            return label
+
+    n = parse_int(raw)
+    if n is not None:
+        return str(n)
+
+    return raw
+
+
+def located_floor_matches(actual_value, wanted):
+    wanted = str(wanted or "").strip()
+    if not wanted:
+        return True
+
+    actual = normalize_floor_text(actual_value)
+    if not actual:
+        return False
+
+    if wanted == "basement":
+        return actual == "Bodrum"
+    if wanted == "ground":
+        return actual == "Zemin/Giriş"
+    if wanted == "roof":
+        return actual == "Çatı"
+    if wanted == "detached":
+        return actual == "Müstakil"
+
+    actual_n = parse_int(actual)
+
+    if wanted == "1-3":
+        return actual_n is not None and 1 <= actual_n <= 3
+    if wanted == "4-7":
+        return actual_n is not None and 4 <= actual_n <= 7
+    if wanted == "8-12":
+        return actual_n is not None and 8 <= actual_n <= 12
+    if wanted == "13+":
+        return actual_n is not None and actual_n >= 13
+
+    return False
+
+
 def listing_matches_filters(row, filters):
     if not listing_date_is_allowed(row.listing_date, filters.get("date_filter")):
         return False
@@ -1125,7 +1206,15 @@ def listing_matches_filters(row, filters):
     if room and row.rooms != room:
         return False
 
+    floor_filter = str(filters.get("located_floor_filter") or "").strip()
+    if floor_filter and not located_floor_matches(
+        getattr(row, "located_floor", ""), floor_filter
+    ):
+        return False
+
     comparisons = (
+        ("total_floors", "total_floors_min", ">="),
+        ("total_floors", "total_floors_max", "<="),
         ("gross_m2", "min_m2", ">="),
         ("gross_m2", "max_m2", "<="),
         ("price", "min_price", ">="),
@@ -1176,8 +1265,9 @@ def load_listings_from_db(filters):
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id,district,neighborhood,title,price,gross_m2,net_m2,
-                       rooms,listing_date,building_age,property_group,
-                       location_verified,price_verified,verification_version,source,url
+                       rooms,listing_date,building_age,total_floors,located_floor,
+                       property_group,location_verified,price_verified,
+                       verification_version,source,url
                 FROM pas_listings
                 WHERE active=TRUE
                   AND location_verified=TRUE
@@ -1220,6 +1310,8 @@ def load_listings_from_db(filters):
             rooms=r["rooms"] or "",
             listing_date=normalize_listing_date(r["listing_date"]),
             building_age=parse_int(r["building_age"]),
+            total_floors=parse_int(r["total_floors"]),
+            located_floor=r["located_floor"] or "",
             property_group=r["property_group"] or "residential",
             location_verified=bool(r["location_verified"]),
             price_verified=bool(r["price_verified"]),
@@ -1505,7 +1597,40 @@ class NeighborhoodApifyProvider:
         building_age = parse_building_age(
             self._pick(item, "buildingAge", "building_age", "buildingAgeYears")
             or self._pick(raw, "buildingAge", "building_age", "buildingAgeYears")
+            or self._named_attribute(item, "Bina Yaşı", "Bina Yasi")
+            or self._coded_attribute(item, "a812")
         )
+
+        total_floors = parse_int(
+            self._pick(
+                item, "totalFloors", "numberOfFloors", "buildingFloors",
+                "floorCount", "totalFloorCount"
+            )
+            or self._pick(
+                raw, "totalFloors", "numberOfFloors", "buildingFloors",
+                "floorCount", "totalFloorCount"
+            )
+            or self._named_attribute(
+                item, "Kat Sayısı", "Bina Kat Sayısı", "Toplam Kat Sayısı"
+            )
+            or self._coded_attribute(item, "a810")
+        )
+
+        located_floor = normalize_floor_text(
+            self._pick(
+                item, "locatedFloor", "floor", "floorNumber",
+                "floorInfo", "currentFloor"
+            )
+            or self._pick(
+                raw, "locatedFloor", "floor", "floorNumber",
+                "floorInfo", "currentFloor"
+            )
+            or self._named_attribute(
+                item, "Bulunduğu Kat", "Bulundugu Kat", "Kat"
+            )
+            or self._coded_attribute(item, "a811")
+        )
+
         listed_at = (
             self._pick(item, "listingDate", "listedAt", "createdAt", "date", "dateCreated")
             or self._pick(raw, "listingDate", "listedAt", "createdAt", "date", "dateCreated") or ""
@@ -1574,6 +1699,8 @@ class NeighborhoodApifyProvider:
             rooms=rooms,
             listing_date=normalize_listing_date(listed_at),
             building_age=building_age,
+            total_floors=total_floors,
+            located_floor=located_floor,
             property_group=property_group,
             location_verified=True,
             price_verified=True,
@@ -1936,8 +2063,8 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 
 /* ===== v4.28 compact + favorite filters ===== */
 .quickbar-four{
-  grid-template-columns:1fr 1fr 1fr 1fr!important;
-  gap:4px!important;
+  grid-template-columns:1.05fr 1.05fr .9fr 1fr 1fr 1fr!important;
+  gap:3px!important;
 }
 .compact-age{display:grid;grid-template-columns:1fr 1fr;gap:3px}
 .compact-age input{min-width:0}
@@ -1962,9 +2089,9 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 #filterDetails[open]>summary{padding-bottom:4px}
 #filterDetails .filter-inner{padding:0 5px 6px}
 @media(max-width:600px){
-  .quickbar-four{grid-template-columns:repeat(4,minmax(0,1fr))!important}
-  .quickbar-four .field{font-size:8.5px!important}
-  .quickbar-four select,.quickbar-four input{padding:5px 3px!important;font-size:10.5px!important}
+  .quickbar-four{grid-template-columns:repeat(6,minmax(0,1fr))!important}
+  .quickbar-four .field{font-size:7.8px!important}
+  .quickbar-four select,.quickbar-four input{padding:4px 2px!important;font-size:9.7px!important}
   .filter-fav-grid,.filter-grid-v428{grid-template-columns:repeat(4,minmax(0,1fr))!important}
   .filter-box{padding:3px}
   .filter-box .field{font-size:8.5px!important}
@@ -2043,6 +2170,27 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
         <input name="building_age_max" type="number" min="0" value="2" placeholder="Max">
       </div>
     </div>
+    <div>
+      <label class="field">Bina Kat Sayısı</label>
+      <div class="compact-age">
+        <input name="total_floors_min" type="number" min="1" placeholder="Min">
+        <input name="total_floors_max" type="number" min="1" placeholder="Max">
+      </div>
+    </div>
+    <div>
+      <label class="field">Bulunduğu Kat</label>
+      <select name="located_floor_filter">
+        <option value="">Farketmez</option>
+        <option value="basement">Bodrum</option>
+        <option value="ground">Zemin / Giriş</option>
+        <option value="1-3">1–3. Kat</option>
+        <option value="4-7">4–7. Kat</option>
+        <option value="8-12">8–12. Kat</option>
+        <option value="13+">13+ Kat</option>
+        <option value="roof">Çatı</option>
+        <option value="detached">Müstakil</option>
+      </select>
+    </div>
   </div>
 
   <div id="favoriteFiltersWrap" class="filter-fav-wrap hidden">
@@ -2092,6 +2240,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
           <th>Mahalle</th><th>Oda</th><th>Yaş</th>
           <th>Net m²</th><th class="usd-value">Net $/m²</th><th>Net TL/m²</th><th>Fiyat</th>
           <th>Brüt TL/m²</th><th>Brüt m²</th>
+          <th>Bina Katı</th><th>Bulunduğu Kat</th>
           <th>İlan Tarihi</th><th>İlan ID</th><th>PAS</th>
         </tr>
       </thead>
@@ -2107,7 +2256,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 100 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. v4.24 öncesi konum/fiyat doğrulaması olmayan kayıtlar sonuçlardan tamamen gizlenir. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 100 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. v4.24 öncesi konum/fiyat doğrulaması olmayan kayıtlar sonuçlardan tamamen gizlenir. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -2382,6 +2531,9 @@ function formPayload(){
     max_price:fd.get("max_price")||"",
     building_age_min:fd.get("building_age_min")||"",
     building_age_max:fd.get("building_age_max")||"",
+    total_floors_min:fd.get("total_floors_min")||"",
+    total_floors_max:fd.get("total_floors_max")||"",
+    located_floor_filter:fd.get("located_floor_filter")||"",
     net_m2_min:fd.get("net_m2_min")||"",
     net_m2_max:fd.get("net_m2_max")||"",
     gross_m2_min:fd.get("gross_m2_min")||"",
@@ -2425,6 +2577,8 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
         <td>${money(r.price)}</td>
         <td>${money(r.gross_price_m2)}</td>
         <td>${r.gross_m2==null?"-":r.gross_m2}</td>
+        <td>${r.total_floors==null?"-":r.total_floors}</td>
+        <td>${esc(r.located_floor||"-")}</td>
         <td>${esc(r.listing_date||"-")}</td>
         <td>${esc(r.id||"-")}</td>
         <td>${r.opportunity_score??"-"} <span class="small">${esc(r.opportunity_label||"")}</span></td>
@@ -2538,6 +2692,7 @@ function collectState(){
   [
     "date_filter","property_group","rooms","min_m2","max_m2","min_price","max_price",
     "building_age_min","building_age_max",
+    "total_floors_min","total_floors_max","located_floor_filter",
     "net_m2_min","net_m2_max","gross_m2_min","gross_m2_max"
   ].forEach(k=>filters[k]=fd.get(k)||"");
 
@@ -2786,6 +2941,9 @@ def api_sync():
             "max_price": payload.get("max_price", ""),
             "building_age_min": payload.get("building_age_min", ""),
             "building_age_max": payload.get("building_age_max", ""),
+            "total_floors_min": payload.get("total_floors_min", ""),
+            "total_floors_max": payload.get("total_floors_max", ""),
+            "located_floor_filter": payload.get("located_floor_filter", ""),
             "net_m2_min": payload.get("net_m2_min", ""),
             "net_m2_max": payload.get("net_m2_max", ""),
             "gross_m2_min": payload.get("gross_m2_min", ""),
