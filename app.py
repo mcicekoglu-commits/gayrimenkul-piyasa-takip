@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.30-history-7day"
+VERSION = "v4.31-cost-limit-50"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -175,7 +175,7 @@ def env_float(name, default):
         return default
 
 
-LIVE_NEIGHBORHOOD_MAX_RESULTS = max(1, min(env_int("PAS_SYNC_MAX_RESULTS", 100), 100))
+LIVE_NEIGHBORHOOD_MAX_RESULTS = max(1, min(env_int("PAS_SYNC_MAX_RESULTS", 50), 50))
 SYNC_CACHE_HOURS = max(
     1, min(env_int("PAS_SYNC_CACHE_HOURS", 6), 72)
 )
@@ -1481,7 +1481,7 @@ class NeighborhoodApifyProvider:
 
         limit = max(
             1,
-            min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), 100)
+            min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), 50)
         )
 
         actor_input = {
@@ -2315,7 +2315,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 100 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. v4.24 öncesi konum/fiyat doğrulaması olmayan kayıtlar sonuçlardan tamamen gizlenir. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 50 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. v4.24 öncesi konum/fiyat doğrulaması olmayan kayıtlar sonuçlardan tamamen gizlenir. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -2675,7 +2675,7 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
     if(!result.ok||!data.ok)throw new Error(data.error||("Güncelleme başarısız. HTTP "+result.status));
 
     showSuccess(
-      `${district}: en fazla ${data.hard_limit||100} ilan sınırıyla ${data.raw_received} ilan tarandı; `+
+      `${district}: en fazla ${data.hard_limit||50} ilan sınırıyla ${data.raw_received} ilan tarandı; `+
       `${neighborhood} için ${data.accepted} doğrulanmış ilan bulundu. `+
       `${data.new} yeni, ${data.updated} güncellendi. `+
       `${data.retired_legacy||0} eski doğrulanmamış kayıt sonuçlardan çıkarıldı.`
