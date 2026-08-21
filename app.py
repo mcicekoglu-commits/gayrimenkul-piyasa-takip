@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.19-usd-m2"
+VERSION = "v4.20-property-safe"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -1208,18 +1208,12 @@ class NeighborhoodApifyProvider:
 
         if property_group == "commercial":
             actor_input["propertyCategory"] = "Commercial"
-        elif property_group == "apartment":
-            actor_input["propertyCategory"] = "Residential"
-            actor_input["propertyType"] = [
-                "Apartment", "Residence", "Waterfront Apartment"
-            ]
-        elif property_group == "villa":
-            actor_input["propertyCategory"] = "Residential"
-            actor_input["propertyType"] = [
-                "Villa", "Detached House", "Summer House",
-                "Farm House", "Mansion", "Waterfront Villa"
-            ]
         else:
+            # v4.20:
+            # Daire / Villa alt tipini Actor'a göndermiyoruz.
+            # Actor bazı ilçe+tarih+çoklu propertyType kombinasyonlarında
+            # 0 ham sonuç döndürebiliyor. Bunun yerine Residential kapsamın
+            # tamamını çekip propertyType sınıflamasını PAS içinde yapıyoruz.
             actor_input["propertyCategory"] = "Residential"
 
         # Actor native tarih seçenekleri: 24 saat, 3/7/15/30 gün.
@@ -1395,26 +1389,42 @@ class NeighborhoodApifyProvider:
             or ""
         ).strip()
 
-        if slug(raw_category) == "commercial":
+        category_path = self._pick(item, "categoryPath") or self._pick(raw, "categoryPath") or ""
+        if isinstance(category_path, list):
+            category_path_text = " ".join(str(x) for x in category_path)
+        else:
+            category_path_text = str(category_path)
+
+        classify_text = " ".join([
+            raw_type,
+            raw_category,
+            category_path_text,
+            title,
+        ])
+        classify_slug = slug(classify_text)
+
+        villa_keywords = (
+            "villa", "mustakil", "detached-house", "summer-house",
+            "yazlik", "farm-house", "ciftlik-evi", "mansion",
+            "kosk", "waterfront-villa", "yali"
+        )
+        apartment_keywords = (
+            "apartment", "daire", "residence", "rezidans",
+            "waterfront-apartment"
+        )
+        commercial_keywords = (
+            "commercial", "isyeri", "is-yeri", "ofis", "dukkan",
+            "magaza", "depo", "atolye"
+        )
+
+        if any(k in classify_slug for k in commercial_keywords):
             property_group = "commercial"
-        elif slug(raw_type) in {
-            "villa", "detached-house", "summer-house",
-            "farm-house", "mansion", "waterfront-villa"
-        }:
+        elif any(k in classify_slug for k in villa_keywords):
             property_group = "villa"
-        elif slug(raw_type) in {
-            "apartment", "residence", "waterfront-apartment"
-        }:
+        elif any(k in classify_slug for k in apartment_keywords):
             property_group = "apartment"
         else:
-            requested_group = str(
-                getattr(self, "_active_property_group", "") or "residential"
-            )
-            property_group = (
-                requested_group
-                if requested_group in ("apartment", "villa", "commercial")
-                else "residential"
-            )
+            property_group = "residential"
 
         listing = Listing(
             id=listing_id, district=fallback_district, neighborhood=fallback_neighborhood,
@@ -1915,7 +1925,7 @@ Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösteri
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_state_v419";
+const STATE_KEY="hlf_pas_state_v420";
 
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
@@ -2446,8 +2456,10 @@ def api_sync():
             }.get(str(filters.get("date_filter") or "current"), "Seçili dönem")
             message = (
                 f"{district} / {neighborhood}: {period_label} sorgusunda "
-                f"{result['raw_count']} ham sonuç döndü; doğrulama ve seçili "
-                "filtrelerden sonra kaydedilecek ilan kalmadı."
+                f"{result['raw_count']} ham sonuç döndü; "
+                f"mülk tipi={filters.get('property_group','residential_all')}. "
+                "Mahalle/tarih/URL/fiyat/m² doğrulaması ve seçili filtrelerden "
+                "sonra kaydedilecek ilan kalmadı."
             )
             record_sync_state(district, neighborhood, 0, message)
 
@@ -2530,6 +2542,7 @@ def api_provider_status():
         listing_url_id_validation=True,
         usd_try_source="TCMB ForexSelling",
         usd_try_cache_minutes=USD_TRY_CACHE_MINUTES,
+        property_filter_strategy="broad-category-fetch + PAS local classification",
     )
 
 
