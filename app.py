@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.27-selected-district-favorites"
+VERSION = "v4.28-compact-favorite-filters"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -1933,6 +1933,44 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
   .metrics .metric .v{font-size:12px;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 }
 
+
+/* ===== v4.28 compact + favorite filters ===== */
+.quickbar-four{
+  grid-template-columns:1fr 1fr 1fr 1fr!important;
+  gap:4px!important;
+}
+.compact-age{display:grid;grid-template-columns:1fr 1fr;gap:3px}
+.compact-age input{min-width:0}
+.filter-fav-wrap{
+  background:#f8fbff;border:1px solid #e5edf6;border-radius:9px;
+  padding:4px;margin:4px 0;
+}
+.filter-fav-grid,.filter-grid-v428{
+  display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;
+}
+.filter-box{
+  position:relative;min-width:0;border:1px solid var(--line);
+  border-radius:8px;padding:4px;background:#fff;
+}
+.filter-box .field{padding-right:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.filter-star{
+  position:absolute;right:3px;top:2px;border:0;background:transparent;
+  color:#c6cbd2;font-size:15px;line-height:1;cursor:pointer;padding:0;
+}
+.filter-star.on{color:#e6ad00}
+.filter-box input,.filter-box select{padding:5px!important;font-size:11.5px!important;border-radius:6px!important}
+#filterDetails[open]>summary{padding-bottom:4px}
+#filterDetails .filter-inner{padding:0 5px 6px}
+@media(max-width:600px){
+  .quickbar-four{grid-template-columns:repeat(4,minmax(0,1fr))!important}
+  .quickbar-four .field{font-size:8.5px!important}
+  .quickbar-four select,.quickbar-four input{padding:5px 3px!important;font-size:10.5px!important}
+  .filter-fav-grid,.filter-grid-v428{grid-template-columns:repeat(4,minmax(0,1fr))!important}
+  .filter-box{padding:3px}
+  .filter-box .field{font-size:8.5px!important}
+  .filter-box input,.filter-box select{padding:4px 3px!important;font-size:10.5px!important}
+}
+
 </style>
 </head>
 <body>
@@ -1971,7 +2009,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 </div>
 
 <div class="card">
-  <div class="quickbar quickbar-three">
+  <div class="quickbar quickbar-four">
     <div>
       <label class="field">İlan Tarihi</label>
       <select name="date_filter">
@@ -1998,27 +2036,23 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
         <option>4+1</option><option>5+1 ve üzeri</option>
       </select>
     </div>
+    <div>
+      <label class="field">Bina Yaşı</label>
+      <div class="compact-age">
+        <input name="building_age_min" type="number" min="0" value="0" placeholder="Min">
+        <input name="building_age_max" type="number" min="0" value="2" placeholder="Max">
+      </div>
+    </div>
   </div>
 
-  <details id="filterDetails">
-    <summary>Diğer filtreler</summary>
-    <div style="padding:0 8px 9px">
-      <div class="filter-grid">
-        <div><label class="field">Min Brüt m²</label><input name="min_m2" type="number" min="0"></div>
-        <div><label class="field">Max Brüt m²</label><input name="max_m2" type="number" min="0"></div>
+  <div id="favoriteFiltersWrap" class="filter-fav-wrap hidden">
+    <div id="favoriteFilters" class="filter-fav-grid"></div>
+  </div>
 
-        <div><label class="field">Min Fiyat</label><input name="min_price" type="number" min="0"></div>
-        <div><label class="field">Max Fiyat</label><input name="max_price" type="number" min="0"></div>
-
-        <div><label class="field">Min Bina Yaşı</label><input name="building_age_min" type="number" min="0" value="0"></div>
-        <div><label class="field">Max Bina Yaşı</label><input name="building_age_max" type="number" min="0" value="2"></div>
-
-        <div><label class="field">Min Net TL/m²</label><input name="net_m2_min" type="number"></div>
-        <div><label class="field">Max Net TL/m²</label><input name="net_m2_max" type="number"></div>
-
-        <div><label class="field">Min Brüt TL/m²</label><input name="gross_m2_min" type="number"></div>
-        <div><label class="field">Max Brüt TL/m²</label><input name="gross_m2_max" type="number"></div>
-      </div>
+  <details id="filterDetails" open>
+    <summary>Filtreler</summary>
+    <div class="filter-inner">
+      <div id="otherFilters" class="filter-grid-v428"></div>
     </div>
   </details>
 </div>
@@ -2443,6 +2477,62 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
   }
 });
 
+
+const EXTRA_FILTER_DEFS=[
+  ["min_m2","Min Brüt m²","number"],
+  ["max_m2","Max Brüt m²","number"],
+  ["min_price","Min Fiyat","number"],
+  ["max_price","Max Fiyat","number"],
+  ["net_m2_min","Min Net TL/m²","number"],
+  ["net_m2_max","Max Net TL/m²","number"],
+  ["gross_m2_min","Min Brüt TL/m²","number"],
+  ["gross_m2_max","Max Brüt TL/m²","number"]
+];
+let favoriteFilters=new Set();
+
+function filterBoxHtml(def,isFav){
+  const [name,label,type]=def;
+  return `<div class="filter-box" data-filter="${esc(name)}">
+    <label class="field">${esc(label)}</label>
+    <button class="filter-star ${isFav?"on":""}" type="button"
+      onclick='toggleFavoriteFilter(${JSON.stringify(name)})'>★</button>
+    <input name="${esc(name)}" type="${type}" min="0">
+  </div>`;
+}
+function currentExtraFilterValues(){
+  const vals={};
+  for(const [name] of EXTRA_FILTER_DEFS){
+    const el=document.querySelector(`[name="${name}"]`);
+    vals[name]=el?el.value:"";
+  }
+  return vals;
+}
+function renderFilterFavorites(values=null){
+  const vals=values||currentExtraFilterValues();
+  const fav=document.getElementById("favoriteFilters");
+  const other=document.getElementById("otherFilters");
+  const wrap=document.getElementById("favoriteFiltersWrap");
+
+  const favDefs=EXTRA_FILTER_DEFS.filter(d=>favoriteFilters.has(d[0]));
+  const otherDefs=EXTRA_FILTER_DEFS.filter(d=>!favoriteFilters.has(d[0]));
+
+  fav.innerHTML=favDefs.map(d=>filterBoxHtml(d,true)).join("");
+  other.innerHTML=otherDefs.map(d=>filterBoxHtml(d,false)).join("");
+  wrap.classList.toggle("hidden",favDefs.length===0);
+
+  for(const [name] of EXTRA_FILTER_DEFS){
+    const el=document.querySelector(`[name="${name}"]`);
+    if(el && Object.prototype.hasOwnProperty.call(vals,name))el.value=vals[name]??"";
+  }
+}
+function toggleFavoriteFilter(name){
+  const vals=currentExtraFilterValues();
+  if(favoriteFilters.has(name))favoriteFilters.delete(name);
+  else favoriteFilters.add(name);
+  renderFilterFavorites(vals);
+  saveState();
+}
+
 function collectState(){
   const fd=new FormData(document.getElementById("pasForm")), filters={};
   [
@@ -2457,6 +2547,7 @@ function collectState(){
     neighborhoods:selectedNeighborhoods,
     favoriteDistricts:[...favoriteDistricts],
     favoriteNeighborhoods,
+    favoriteFilters:[...favoriteFilters],
     openDistricts:[...openDistricts],
     filters
   };
@@ -2482,6 +2573,7 @@ function loadState(){
   }
 
   if(!states.length){
+    renderFilterFavorites({});
     renderAll();
     return;
   }
@@ -2489,6 +2581,13 @@ function loadState(){
   // Seçimler/filtreler için en güncel bulunan state'i kullan.
   // Liste sırası STATE_KEY, sonra yeni -> eski legacy şeklindedir.
   const saved=states[0].data;
+
+  favoriteFilters=new Set(
+    (saved.favoriteFilters||[]).filter(
+      n=>EXTRA_FILTER_DEFS.some(d=>d[0]===n)
+    )
+  );
+  renderFilterFavorites(saved.filters||{});
 
   const sideEl=document.querySelector(
     `input[name="side"][value="${saved.side||"all"}"]`
