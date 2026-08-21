@@ -33,7 +33,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.15-full-period-sync"
+VERSION = "v4.17-date-verified"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -1068,6 +1068,10 @@ class NeighborhoodApifyProvider:
             "maxResults": 0,
         }
 
+        # Actor native tarih seçenekleri: 24 saat, 3/7/15/30 gün.
+        # 7d ve 30d doğrudan kaynağa gönderilir.
+        # 90d Actor tarafından native desteklenmediği için 30 günlük canlı
+        # pencere + PostgreSQL geçmişi yaklaşımıyla yürütülür.
         date_map = {
             "current": "Last 24 hours",
             "7d": "Last 7 days",
@@ -1161,13 +1165,17 @@ class NeighborhoodApifyProvider:
             or ""
         )
 
-        # Hedef konum açıkça eşleşmeden kayıt yok.
-        if slug(city) != "istanbul":
+        # v4.17: Actor bazen mahalleyi quarter/neighborhood/address alanlarından
+        # farklı birinde döndürüyor. Tek bir alana bakıp gerçek ilanı eleme.
+        if not item_matches_requested_location(
+            item, raw, fallback_district, fallback_neighborhood
+        ):
             return None
-        if slug(district) != slug(fallback_district):
-            return None
-        if slug(neighborhood) != slug(fallback_neighborhood):
-            return None
+
+        # DB'de kullanıcının seçtiği standart mahalle adını sakla.
+        city = "İstanbul"
+        district = fallback_district
+        neighborhood = fallback_neighborhood
 
         listing_url = str(
             self._pick(item, "url", "listingUrl", "href", "sourceUrl")
@@ -1241,7 +1249,11 @@ class NeighborhoodApifyProvider:
         )
 
         accepted = []
-        rejected = {"parse_or_validation": 0}
+        rejected = {
+            "parse_or_validation": 0,
+            "outside_date_range": 0,
+            "duplicate_id": 0,
+        }
         seen = set()
 
         for raw in raw_items:
@@ -1249,7 +1261,18 @@ class NeighborhoodApifyProvider:
             if not item:
                 rejected["parse_or_validation"] += 1
                 continue
+
+            # v4.17: Actor'a listingDate gönderiyoruz, ama PAS da ikinci kez
+            # kendi tarafında tarihi doğruluyor. Böylece "Son 1 hafta" seçimi
+            # gerçekten son 7 günlük ilanları kabul eder.
+            if not listing_date_is_allowed(
+                item.listing_date, (filters or {}).get("date_filter")
+            ):
+                rejected["outside_date_range"] += 1
+                continue
+
             if item.id in seen:
+                rejected["duplicate_id"] += 1
                 continue
             seen.add(item.id)
             accepted.append(item)
@@ -1284,12 +1307,28 @@ def analyze(listings):
             "avg_gross_m2_price": None,
             "avg_net_m2_price": None,
             "avg_building_age": None,
+            "avg_net_m2": None,
+            "avg_rooms": None,
         }
 
     prices = [x.price for x in listings if x.price]
     gross = [x.gross_price_m2 for x in listings if x.gross_price_m2]
     net = [x.net_price_m2 for x in listings if x.net_price_m2]
     ages = [x.building_age for x in listings if x.building_age is not None]
+    net_sizes = [x.net_m2 for x in listings if x.net_m2 and x.net_m2 > 0]
+
+    # Oda ortalaması: 3+1 -> 3, 2+1 -> 2.
+    # Sonuç kullanıcıya örn. "2.8+1" şeklinde gösterilir.
+    room_values = []
+    for x in listings:
+        room_text = str(x.rooms or "").strip()
+        m = re.match(r"^(\d+)\s*\+", room_text)
+        if m:
+            room_values.append(int(m.group(1)))
+        elif re.fullmatch(r"\d+", room_text):
+            room_values.append(int(room_text))
+
+    avg_rooms = round(statistics.mean(room_values), 1) if room_values else None
 
     return {
         "count": len(listings),
@@ -1298,6 +1337,8 @@ def analyze(listings):
         "avg_gross_m2_price": round(statistics.mean(gross)) if gross else None,
         "avg_net_m2_price": round(statistics.mean(net)) if net else None,
         "avg_building_age": round(statistics.mean(ages), 1) if ages else None,
+        "avg_net_m2": round(statistics.mean(net_sizes), 1) if net_sizes else None,
+        "avg_rooms": avg_rooms,
     }
 
 
@@ -1424,7 +1465,7 @@ th{font-size:11px}
  .subtitle{font-size:11px}
  .header{margin-bottom:6px}
  .card{padding:9px;border-radius:13px}
- .metrics{grid-template-columns:1fr 1fr}
+ .metrics{grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}
  .grid,.nb-grid{grid-template-columns:1fr 1fr}
 }
 
@@ -1522,6 +1563,13 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
   .card{padding:7px}
   .favorite-section{grid-template-columns:repeat(3,minmax(0,1fr))!important}
   .nb-grid{grid-template-columns:repeat(3,minmax(0,1fr))!important}
+}
+
+
+@media(max-width:600px){
+  .metrics .metric{padding:6px 5px;min-width:0}
+  .metrics .metric .k{font-size:9px;line-height:1.05}
+  .metrics .metric .v{font-size:12px;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 }
 
 </style>
@@ -1627,6 +1675,8 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
     <div class="metric"><div class="k">Ort. Net TL/m²</div><div class="v" id="mMedianNetM2">-</div></div>
     <div class="metric"><div class="k">Ort. Brüt TL/m²</div><div class="v" id="mMedianM2">-</div></div>
     <div class="metric"><div class="k">Ort. Yaş</div><div class="v" id="mAvgAge">-</div></div>
+    <div class="metric"><div class="k">Ort. Net m²</div><div class="v" id="mAvgNetM2">-</div></div>
+    <div class="metric"><div class="k">Ort. Oda</div><div class="v" id="mAvgRooms">-</div></div>
   </div>
 
   <div class="title" style="margin-top:13px">İlanlar</div>
@@ -1662,7 +1712,7 @@ Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösteri
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_state_v415";
+const STATE_KEY="hlf_pas_state_v416";
 
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
@@ -1905,6 +1955,10 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
     document.getElementById("mMedianNetM2").textContent=money(data.analysis.avg_net_m2_price);
     document.getElementById("mAvgAge").textContent=
       data.analysis.avg_building_age==null?"-":data.analysis.avg_building_age+" yıl";
+    document.getElementById("mAvgNetM2").textContent=
+      data.analysis.avg_net_m2==null?"-":data.analysis.avg_net_m2+" m²";
+    document.getElementById("mAvgRooms").textContent=
+      data.analysis.avg_rooms==null?"-":data.analysis.avg_rooms+"+1";
 
     document.getElementById("listingRows").innerHTML=data.listings.map(r=>`
       <tr class="${r.url?"listing-clickable":""}" data-url="${esc(r.url||"")}">
@@ -2164,10 +2218,16 @@ def api_sync():
         ]
 
         if not accepted:
+            period_label = {
+                "current": "Son 24 saat",
+                "7d": "Son 7 gün",
+                "30d": "Son 30 gün",
+                "90d": "Son 90 gün",
+            }.get(str(filters.get("date_filter") or "current"), "Seçili dönem")
             message = (
-                f"{district} / {neighborhood}: {result['raw_count']} ham sonuç döndü; "
-                "URL/ID/fiyat/m² doğrulaması ve seçili filtrelerden sonra "
-                "kaydedilecek doğrulanmış ilan kalmadı."
+                f"{district} / {neighborhood}: {period_label} sorgusunda "
+                f"{result['raw_count']} ham sonuç döndü; doğrulama ve seçili "
+                "filtrelerden sonra kaydedilecek ilan kalmadı."
             )
             record_sync_state(district, neighborhood, 0, message)
 
