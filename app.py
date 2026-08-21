@@ -33,7 +33,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.12-location-guard-fix"
+VERSION = "v4.13-real-estate-engine"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -137,7 +137,7 @@ NEIGHBORHOODS = {
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 APIFY_API_TOKEN = os.environ.get("APIFY_API_TOKEN", "").strip()
 APIFY_TIMEOUT = int(os.environ.get("APIFY_TIMEOUT", "300") or 300)
-ACTOR_ID = "clearpath~sahibinden-scraper-pro"
+ACTOR_ID = "clearpath~sahibinden-real-estate"
 
 
 def env_int(name, default):
@@ -163,7 +163,7 @@ SYNC_CACHE_HOURS = max(
 
 
 # Bir canlı güncellemenin toplam Apify maliyetine üst sınır.
-# Search Scraper Pro 20 özet ilan için normalde bunun çok altında kalmalıdır.
+# Sahibinden Real Estate Scraper 20 özet ilan için normalde bunun çok altında kalmalıdır.
 APIFY_MAX_TOTAL_CHARGE_USD = max(
     0.10, min(env_float("PAS_APIFY_MAX_TOTAL_CHARGE_USD", 0.25), 2.00)
 )
@@ -417,7 +417,7 @@ def normalize_compare(value):
 
 def item_matches_requested_location(item, raw, district, neighborhood):
     """
-    Search Scraper Pro sonucunun hedef konumla uyuşup uyuşmadığını denetler.
+    Sahibinden Real Estate Scraper sonucunun hedef konumla uyuşup uyuşmadığını denetler.
 
     Açık district / neighborhood alanları varsa bunlar hedef ile eşleşmek zorundadır.
     Açık city alanı varsa İstanbul olmak zorundadır.
@@ -502,7 +502,7 @@ def extract_real_price(item, raw):
         if not isinstance(source, dict):
             continue
 
-        # Search Scraper Pro'da gerçek satış fiyatı.
+        # Sahibinden Real Estate Scraper'da gerçek satış fiyatı.
         formatted = source.get("formattedPrice")
         if formatted not in (None, ""):
             value = parse_int(formatted)
@@ -1030,36 +1030,51 @@ class NeighborhoodApifyProvider:
         if not self.configured():
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
+        filters = filters or {}
         limit = max(1, min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), 200))
-        start_url = sahibinden_neighborhood_url(district, neighborhood, filters=filters)
 
-        # Ücretli çağrıdan önce kapsam doğrulaması.
-        validate_live_start_url(start_url, district, neighborhood)
-
-        # Güncel Search Scraper Pro şeması:
-        # enrichment açık bırakılırsa varsayılan TRUE olabilir ve maliyet artar.
-        # Bu nedenle açıkça FALSE gönderiyoruz.
         actor_input = {
-            "startUrls": [start_url],
-            "enrichment": False,
+            "listingType": "Sale",
+            "propertyCategory": "Residential",
+            "propertyType": ["Apartment"],
+            "city": "Istanbul",
+            "district": [district],
+            "sortBy": "Newest",
+            "extractPhoneNumbers": False,
             "maxResults": limit,
         }
 
-        params = {
-            "clean": "true",
-            "format": "json",
-            "limit": str(limit),
-            "maxItems": str(limit),
-            "maxTotalChargeUsd": f"{APIFY_MAX_TOTAL_CHARGE_USD:.2f}",
-            "timeout": str(self.timeout),
-        }
+        min_price = parse_int(filters.get("min_price"))
+        max_price = parse_int(filters.get("max_price"))
+        min_size = parse_int(filters.get("min_m2"))
+        max_size = parse_int(filters.get("max_m2"))
+        if min_price is not None:
+            actor_input["minPrice"] = min_price
+            actor_input["currency"] = "TRY"
+        if max_price is not None:
+            actor_input["maxPrice"] = max_price
+            actor_input["currency"] = "TRY"
+        if min_size is not None:
+            actor_input["minSize"] = min_size
+        if max_size is not None:
+            actor_input["maxSize"] = max_size
 
+        room = str(filters.get("rooms") or "").strip()
+        if room and room != "5+1 ve üzeri":
+            actor_input["rooms"] = [room]
+
+        date_map = {"7d": "Last 7 days", "30d": "Last 30 days"}
+        if str(filters.get("date_filter") or "") in date_map:
+            actor_input["listingDate"] = date_map[str(filters.get("date_filter"))]
+
+        params = {
+            "clean": "true", "format": "json",
+            "limit": str(limit), "timeout": str(self.timeout)
+        }
         url = (
             f"https://api.apify.com/v2/acts/{self.actor_id}"
-            "/run-sync-get-dataset-items?"
-            + urlencode(params)
+            "/run-sync-get-dataset-items?" + urlencode(params)
         )
-
         req = Request(
             url,
             data=json.dumps(actor_input, ensure_ascii=False).encode("utf-8"),
@@ -1071,50 +1086,51 @@ class NeighborhoodApifyProvider:
             },
             method="POST"
         )
-
         payload = self._request_json(req)
-
         if isinstance(payload, list):
-            return payload, actor_input, start_url
-        if isinstance(payload, dict):
+            rows = payload
+        elif isinstance(payload, dict):
             rows = payload.get("items") or payload.get("data") or payload.get("results") or []
-            return (rows if isinstance(rows, list) else []), actor_input, start_url
-
-        return [], actor_input, start_url
+            if not isinstance(rows, list):
+                rows = []
+        else:
+            rows = []
+        return rows, actor_input, f"actor://{self.actor_id}/Istanbul/{district}/{neighborhood}"
 
     def normalize_item(self, item, fallback_district, fallback_neighborhood):
         if not isinstance(item, dict):
             return None
-
         raw = item.get("rawSummary") if isinstance(item.get("rawSummary"), dict) else {}
 
-        # Hedef dışı ilanı ASLA seçili mahalle adına yazma.
-        # Burada fallback_district / fallback_neighborhood gerçekten tanımlıdır.
-        if not item_matches_requested_location(
-            item, raw, fallback_district, fallback_neighborhood
-        ):
+        city = normalize_place(self._pick(item, "city", "cityName") or self._pick(raw, "city", "cityName") or "")
+        district = normalize_place(self._pick(item, "district", "districtName") or self._pick(raw, "district", "districtName") or "")
+        neighborhood = normalize_place(
+            self._pick(item, "neighborhood", "neighbourhood", "neighborhoodName", "quarter")
+            or self._pick(raw, "neighborhood", "neighbourhood", "neighborhoodName", "quarter")
+            or ""
+        )
+
+        # Hedef konum açıkça eşleşmeden kayıt yok.
+        if slug(city) != "istanbul":
+            return None
+        if slug(district) != slug(fallback_district):
+            return None
+        if slug(neighborhood) != slug(fallback_neighborhood):
             return None
 
         listing_url = str(
             self._pick(item, "url", "listingUrl", "href", "sourceUrl")
-            or self._pick(raw, "url", "listingUrl", "href", "sourceUrl")
-            or ""
+            or self._pick(raw, "url", "listingUrl", "href", "sourceUrl") or ""
         ).strip()
-
         if listing_url.startswith("/"):
             listing_url = "https://www.sahibinden.com" + listing_url
 
         listing_id = str(
             self._pick(item, "id", "listingId", "adId", "classifiedId")
-            or self._pick(raw, "id", "listingId", "adId", "classifiedId")
-            or ""
+            or self._pick(raw, "id", "listingId", "adId", "classifiedId") or ""
         ).strip()
-
-        url_id = extract_listing_id_from_url(listing_url)
         if not listing_id:
-            listing_id = url_id
-
-        # ID ile URL uyuşmuyorsa ilanı kabul etme.
+            listing_id = extract_listing_id_from_url(listing_url)
         if not listing_id or not valid_listing_url(listing_url, listing_id):
             return None
 
@@ -1122,80 +1138,41 @@ class NeighborhoodApifyProvider:
         if price is None:
             return None
 
-        title = str(
-            self._pick(item, "title", "listingTitle", "adTitle")
-            or self._pick(raw, "title", "listingTitle", "adTitle")
-            or "İlan"
-        ).strip()
-
-        city = normalize_place(
-            self._pick(item, "city", "cityName")
-            or self._pick(raw, "city", "cityName")
-            or "İstanbul"
-        )
-
-        district = normalize_place(fallback_district)
-        neighborhood = normalize_place(fallback_neighborhood)
-
-        # Search Scraper Pro:
-        # a24 = brüt m², a107889 = net m², a20 = oda, a812 = bina yaşı.
         gross_m2 = parse_int(
-            self._pick(item, "grossSize", "grossM2", "gross_m2", "areaGross", "size", "m2")
-            or self._pick(raw, "grossSize", "grossM2", "gross_m2", "areaGross", "size", "m2")
-            or self._named_attribute(item, "m² (Brüt)", "m2 (Brüt)", "Brüt m²", "Brüt")
-            or self._coded_attribute(item, "a24")
+            self._pick(item, "grossSize", "grossM2", "gross_m2", "size", "m2")
+            or self._pick(raw, "grossSize", "grossM2", "gross_m2", "size", "m2")
         )
-
         net_m2 = parse_int(
-            self._pick(item, "netSize", "netM2", "net_m2", "areaNet")
-            or self._pick(raw, "netSize", "netM2", "net_m2", "areaNet")
-            or self._named_attribute(item, "m² (Net)", "m2 (Net)", "Net m²", "Net")
-            or self._coded_attribute(item, "a107889")
+            self._pick(item, "netSize", "netM2", "net_m2")
+            or self._pick(raw, "netSize", "netM2", "net_m2")
         )
-
         gross_m2, net_m2 = valid_area(gross_m2, net_m2)
-
-        # Brüt/net alanlardan ikisi de yoksa veya fiziksel eşleşme güvenilir değilse
-        # ilan yanlış m² fiyatı üretmesin.
         if gross_m2 is None and net_m2 is None:
             return None
 
         rooms = str(
-            self._pick(item, "rooms", "roomCount", "room", "roomInfo")
-            or self._pick(raw, "rooms", "roomCount", "room", "roomInfo")
-            or self._named_attribute(item, "Oda Sayısı", "Oda")
-            or self._coded_attribute(item, "a20")
-            or ""
+            self._pick(item, "rooms", "roomCount", "room")
+            or self._pick(raw, "rooms", "roomCount", "room") or ""
         ).strip()
-
         building_age = parse_building_age(
-            self._pick(item, "buildingAge", "building_age", "buildingAgeYears", "ageOfBuilding")
-            or self._pick(raw, "buildingAge", "building_age", "buildingAgeYears", "ageOfBuilding")
-            or self._named_attribute(item, "Bina Yaşı", "Bina Yasi")
-            or self._coded_attribute(item, "a812")
+            self._pick(item, "buildingAge", "building_age", "buildingAgeYears")
+            or self._pick(raw, "buildingAge", "building_age", "buildingAgeYears")
         )
-
         listed_at = (
             self._pick(item, "listingDate", "listedAt", "createdAt", "date", "dateCreated")
-            or self._pick(raw, "listingDate", "listedAt", "createdAt", "date", "dateCreated")
-            or ""
+            or self._pick(raw, "listingDate", "listedAt", "createdAt", "date", "dateCreated") or ""
         )
-        listing_date = normalize_listing_date(listed_at)
+        title = str(
+            self._pick(item, "title", "listingTitle", "adTitle")
+            or self._pick(raw, "title", "listingTitle", "adTitle") or "İlan"
+        ).strip()
 
         listing = Listing(
-            id=listing_id,
-            district=district,
-            neighborhood=neighborhood,
-            title=title,
-            price=price,
-            gross_m2=gross_m2,
-            net_m2=net_m2,
-            rooms=rooms,
-            listing_date=listing_date,
-            building_age=building_age,
-            source="sahibinden-scraper-pro",
+            id=listing_id, district=fallback_district, neighborhood=fallback_neighborhood,
+            title=title, price=price, gross_m2=gross_m2, net_m2=net_m2,
+            rooms=rooms, listing_date=normalize_listing_date(listed_at),
+            building_age=building_age, source="sahibinden-real-estate"
         )
-
         listing._listing_url = listing_url
         listing._city = city
         return listing
@@ -1616,7 +1593,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 <div class="card info-bottom">
   <details>
     <summary>Veri sağlayıcı ve çalışma bilgisi</summary>
-    <div class="notice" style="margin:0 8px 9px"><strong>Veri sağlayıcı:</strong> PostgreSQL + Search Scraper Pro.
+    <div class="notice" style="margin:0 8px 9px"><strong>Veri sağlayıcı:</strong> PostgreSQL + Sahibinden Real Estate Scraper.
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
@@ -1630,7 +1607,7 @@ Fiyat, Net TL/m² ve Brüt TL/m² PAS tarafından gerçek ilan fiyatı ve gerçe
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_state_v412";
+const STATE_KEY="hlf_pas_state_v413";
 
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
