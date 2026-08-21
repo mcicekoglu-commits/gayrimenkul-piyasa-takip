@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.20-property-safe"
+VERSION = "v4.21-favorite-neighborhoods"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -1704,6 +1704,10 @@ h1{font-size:28px}
   border:1px solid #f4ecd8;
   border-radius:11px;
   padding:5px;
+  position:relative;
+}
+#favoriteNeighborhoods:has(.chip){
+  min-height:39px;
 }
 .favorite-section{
   display:grid!important;
@@ -1925,7 +1929,7 @@ Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösteri
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_state_v420";
+const STATE_KEY="hlf_pas_state_v421";
 
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
@@ -2043,20 +2047,31 @@ function renderFavorites(){
   }).join(""):`<span class="small">Favori ilçe yok</span>`;
 
   const nbRows=[];
-  for(const d of DISTRICTS.filter(sideVisible)){
+
+  // v4.21:
+  // Üstte yalnız SEÇİLİ ilçelere ait favori mahalleleri göster.
+  // Birden fazla ilçe seçiliyse o ilçelerin favori mahalleleri aynı üst alanda
+  // sabit kalır. Böylece ilçe favorileri gibi mahalle favorileri de hızlı erişimdedir.
+  for(const d of DISTRICTS.filter(x=>sideVisible(x)&&selectedDistricts.has(x.name))){
     for(const n of (favoriteNeighborhoods[d.name]||[])){
       const checked=new Set(selectedNeighborhoods[d.name]||[]).has(n);
       const jd=JSON.stringify(d.name), jn=JSON.stringify(n);
-      nbRows.push(`<div class="chip">
+
+      nbRows.push(`<div class="chip" title="${esc(d.name)} · ${esc(n)}">
         <input type="checkbox" ${checked?"checked":""}
           onchange='setNeighborhoodSelected(${jd},${jn},this.checked)'>
         <span>${esc(n)}</span>
-        <button class="star on" type="button" onclick='toggleFavNeighborhood(${jd},${jn})'>★</button>
+        <button class="star on" type="button"
+          onclick='toggleFavNeighborhood(${jd},${jn})'
+          aria-label="${esc(d.name)} ${esc(n)} favoriden çıkar">★</button>
       </div>`);
     }
   }
+
   document.getElementById("favoriteNeighborhoods").innerHTML=
-    nbRows.length?nbRows.join(""):`<span class="small">Favori mahalle yok</span>`;
+    nbRows.length
+      ? nbRows.join("")
+      : `<span class="small">Seçili ilçelerde favori mahalle yok</span>`;
 }
 
 function renderNeighborhoodArea(){
