@@ -3,11 +3,13 @@ import re
 import json
 import statistics
 import unicodedata
+import xml.etree.ElementTree as ET
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from dataclasses import dataclass, asdict
 from datetime import date, datetime, timezone, timedelta
+from threading import Lock
 
 from flask import Flask, request, render_template_string, jsonify
 import psycopg
@@ -33,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.17-date-verified"
+VERSION = "v4.19-usd-m2"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -140,11 +142,30 @@ APIFY_TIMEOUT = int(os.environ.get("APIFY_TIMEOUT", "300") or 300)
 ACTOR_ID = "clearpath~sahibinden-real-estate"
 
 
+# =========================================================
+# USD / TRY — TCMB
+# =========================================================
+
+TCMB_TODAY_XML = "https://www.tcmb.gov.tr/kurlar/today.xml"
+
+_usd_try_cache = {
+    "rate": None,
+    "fetched_at": None,
+    "source": "TCMB",
+}
+_usd_try_lock = Lock()
+
+
 def env_int(name, default):
     try:
         return int(os.environ.get(name, str(default)) or default)
     except Exception:
         return default
+
+
+USD_TRY_CACHE_MINUTES = max(
+    15, min(env_int("PAS_USD_TRY_CACHE_MINUTES", 180), 1440)
+)
 
 
 def env_float(name, default):
@@ -167,6 +188,93 @@ SYNC_CACHE_HOURS = max(
 APIFY_MAX_TOTAL_CHARGE_USD = max(
     0.10, min(env_float("PAS_APIFY_MAX_TOTAL_CHARGE_USD", 0.25), 2.00)
 )
+
+
+
+def get_usd_try_rate(force=False):
+    """
+    TCMB günlük USD döviz satış kurunu alır.
+    Kur uygulama belleğinde cache'lenir; her ilan için internete çıkılmaz.
+    İnternet geçici olarak erişilemezse son başarılı kur kullanılır.
+    İsteğe bağlı acil fallback:
+      PAS_USD_TRY_FALLBACK=...
+    """
+    now = datetime.now(timezone.utc)
+
+    with _usd_try_lock:
+        cached_rate = _usd_try_cache.get("rate")
+        fetched_at = _usd_try_cache.get("fetched_at")
+
+        if (
+            not force
+            and cached_rate
+            and fetched_at
+            and (now - fetched_at).total_seconds() < USD_TRY_CACHE_MINUTES * 60
+        ):
+            return float(cached_rate)
+
+        try:
+            req = Request(
+                TCMB_TODAY_XML,
+                headers={
+                    "Accept": "application/xml,text/xml,*/*",
+                    "User-Agent": f"HLF-PAS/{VERSION}",
+                },
+                method="GET",
+            )
+            with urlopen(req, timeout=12) as response:
+                xml_data = response.read()
+
+            root = ET.fromstring(xml_data)
+            usd = None
+
+            for currency in root.findall("Currency"):
+                if str(currency.attrib.get("CurrencyCode") or "").upper() == "USD":
+                    usd = currency
+                    break
+
+            if usd is None:
+                raise RuntimeError("TCMB XML içinde USD bulunamadı.")
+
+            # Kullanıcıya gösterilecek TL->USD çevrimi için Döviz Satış kurunu kullan.
+            text = (usd.findtext("ForexSelling") or "").strip().replace(",", ".")
+            rate = float(text)
+
+            if rate <= 0:
+                raise RuntimeError("TCMB USD kuru geçersiz.")
+
+            _usd_try_cache["rate"] = rate
+            _usd_try_cache["fetched_at"] = now
+            _usd_try_cache["source"] = "TCMB ForexSelling"
+            return rate
+
+        except Exception as exc:
+            if cached_rate:
+                return float(cached_rate)
+
+            fallback = os.environ.get("PAS_USD_TRY_FALLBACK", "").strip()
+            if fallback:
+                try:
+                    rate = float(fallback.replace(",", "."))
+                    if rate > 0:
+                        _usd_try_cache["rate"] = rate
+                        _usd_try_cache["fetched_at"] = now
+                        _usd_try_cache["source"] = "ENV fallback"
+                        return rate
+                except Exception:
+                    pass
+
+            print("HLF PAS USD/TRY warning:", exc, flush=True)
+            return None
+
+
+def try_to_usd(tl_value, usd_try_rate):
+    if tl_value in (None, "") or not usd_try_rate:
+        return None
+    try:
+        return round(float(tl_value) / float(usd_try_rate))
+    except Exception:
+        return None
 
 
 # =========================================================
@@ -578,6 +686,7 @@ class Listing:
     rooms: str
     listing_date: str
     building_age: int | None = None
+    property_group: str = "residential"
     source: str = "sahibinden-scraper-pro"
 
     @property
@@ -631,6 +740,7 @@ def init_db():
                     rooms TEXT NOT NULL DEFAULT '',
                     listing_date TEXT NOT NULL DEFAULT '',
                     building_age INTEGER,
+                    property_group TEXT NOT NULL DEFAULT 'residential',
                     source TEXT NOT NULL DEFAULT '',
                     url TEXT NOT NULL DEFAULT '',
                     active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -638,6 +748,10 @@ def init_db():
                     last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
+            """)
+            cur.execute("""
+                ALTER TABLE pas_listings
+                ADD COLUMN IF NOT EXISTS property_group TEXT NOT NULL DEFAULT 'residential'
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS pas_sync_state (
@@ -688,11 +802,11 @@ def save_listings_to_db(listings):
                 cur.execute("""
                     INSERT INTO pas_listings (
                         id,district,neighborhood,title,price,gross_m2,net_m2,
-                        rooms,listing_date,building_age,source,url,active,
+                        rooms,listing_date,building_age,property_group,source,url,active,
                         first_seen,last_seen,updated_at
                     )
                     VALUES (
-                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,
+                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,
                         NOW(),NOW(),NOW()
                     )
                     ON CONFLICT (id) DO UPDATE SET
@@ -705,6 +819,7 @@ def save_listings_to_db(listings):
                         rooms=CASE WHEN EXCLUDED.rooms<>'' THEN EXCLUDED.rooms ELSE pas_listings.rooms END,
                         listing_date=CASE WHEN EXCLUDED.listing_date<>'' THEN EXCLUDED.listing_date ELSE pas_listings.listing_date END,
                         building_age=COALESCE(EXCLUDED.building_age,pas_listings.building_age),
+                        property_group=EXCLUDED.property_group,
                         source=EXCLUDED.source,
                         url=EXCLUDED.url,
                         active=TRUE,
@@ -713,7 +828,8 @@ def save_listings_to_db(listings):
                 """, (
                     str(item.id), item.district, item.neighborhood, item.title or "",
                     item.price, item.gross_m2, item.net_m2, item.rooms or "",
-                    item.listing_date or "", item.building_age, item.source or "", url
+                    item.listing_date or "", item.building_age,
+                    item.property_group or "residential", item.source or "", url
                 ))
 
                 if exists:
@@ -779,6 +895,7 @@ def make_query_key(district, neighborhood, filters):
         "engine_version": VERSION,
         "district": district,
         "neighborhood": neighborhood,
+        "property_group": str(filters.get("property_group") or "residential_all"),
         "rooms": str(filters.get("rooms") or ""),
         "min_m2": str(filters.get("min_m2") or ""),
         "max_m2": str(filters.get("max_m2") or ""),
@@ -864,6 +981,24 @@ def listing_matches_filters(row, filters):
     if not listing_date_is_allowed(row.listing_date, filters.get("date_filter")):
         return False
 
+    wanted_property_group = str(
+        filters.get("property_group") or "residential_all"
+    ).strip()
+    actual_property_group = str(
+        getattr(row, "property_group", "") or ""
+    ).strip()
+
+    if wanted_property_group == "apartment" and actual_property_group != "apartment":
+        return False
+    if wanted_property_group == "villa" and actual_property_group != "villa":
+        return False
+    if wanted_property_group == "commercial" and actual_property_group != "commercial":
+        return False
+    if wanted_property_group == "residential_all" and actual_property_group not in (
+        "apartment", "villa", "residential"
+    ):
+        return False
+
     room = str(filters.get("rooms") or "").strip()
     if room and row.rooms != room:
         return False
@@ -919,7 +1054,7 @@ def load_listings_from_db(filters):
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id,district,neighborhood,title,price,gross_m2,net_m2,
-                       rooms,listing_date,building_age,source,url
+                       rooms,listing_date,building_age,property_group,source,url
                 FROM pas_listings
                 WHERE active=TRUE AND source='sahibinden-real-estate' AND district=ANY(%s)
                 ORDER BY listing_date DESC, updated_at DESC
@@ -957,6 +1092,7 @@ def load_listings_from_db(filters):
             rooms=r["rooms"] or "",
             listing_date=normalize_listing_date(r["listing_date"]),
             building_age=parse_int(r["building_age"]),
+            property_group=r["property_group"] or "residential",
             source=r["source"] or "cache",
         )
         item._listing_url = r["url"] or ""
@@ -1057,16 +1193,34 @@ class NeighborhoodApifyProvider:
 
         filters = filters or {}
 
+        property_group = str(
+            filters.get("property_group") or "residential_all"
+        ).strip()
+
         actor_input = {
             "listingType": "Sale",
-            "propertyCategory": "Residential",
-            "propertyType": ["Apartment"],
             "city": "Istanbul",
             "district": [district],
             "sortBy": "Newest",
             "extractPhoneNumbers": False,
             "maxResults": 0,
         }
+
+        if property_group == "commercial":
+            actor_input["propertyCategory"] = "Commercial"
+        elif property_group == "apartment":
+            actor_input["propertyCategory"] = "Residential"
+            actor_input["propertyType"] = [
+                "Apartment", "Residence", "Waterfront Apartment"
+            ]
+        elif property_group == "villa":
+            actor_input["propertyCategory"] = "Residential"
+            actor_input["propertyType"] = [
+                "Villa", "Detached House", "Summer House",
+                "Farm House", "Mansion", "Waterfront Villa"
+            ]
+        else:
+            actor_input["propertyCategory"] = "Residential"
 
         # Actor native tarih seçenekleri: 24 saat, 3/7/15/30 gün.
         # 7d ve 30d doğrudan kaynağa gönderilir.
@@ -1230,17 +1384,54 @@ class NeighborhoodApifyProvider:
             or self._pick(raw, "title", "listingTitle", "adTitle") or "İlan"
         ).strip()
 
+        raw_category = str(
+            self._pick(item, "propertyCategory", "category")
+            or self._pick(raw, "propertyCategory", "category")
+            or ""
+        ).strip()
+        raw_type = str(
+            self._pick(item, "propertyType", "type")
+            or self._pick(raw, "propertyType", "type")
+            or ""
+        ).strip()
+
+        if slug(raw_category) == "commercial":
+            property_group = "commercial"
+        elif slug(raw_type) in {
+            "villa", "detached-house", "summer-house",
+            "farm-house", "mansion", "waterfront-villa"
+        }:
+            property_group = "villa"
+        elif slug(raw_type) in {
+            "apartment", "residence", "waterfront-apartment"
+        }:
+            property_group = "apartment"
+        else:
+            requested_group = str(
+                getattr(self, "_active_property_group", "") or "residential"
+            )
+            property_group = (
+                requested_group
+                if requested_group in ("apartment", "villa", "commercial")
+                else "residential"
+            )
+
         listing = Listing(
             id=listing_id, district=fallback_district, neighborhood=fallback_neighborhood,
             title=title, price=price, gross_m2=gross_m2, net_m2=net_m2,
             rooms=rooms, listing_date=normalize_listing_date(listed_at),
-            building_age=building_age, source="sahibinden-real-estate"
+            building_age=building_age, property_group=property_group,
+            source="sahibinden-real-estate"
         )
         listing._listing_url = listing_url
         listing._city = city
         return listing
 
     def sync_neighborhood(self, district, neighborhood, filters=None, max_results=None):
+        self._active_property_group = str(
+            (filters or {}).get("property_group") or "residential_all"
+        ).strip()
+
         raw_items, actor_input, start_url = self.run_neighborhood(
             district,
             neighborhood,
@@ -1439,7 +1630,7 @@ details[open]>summary::before{transform:rotate(90deg)}
 .filter-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
 .field{display:block;font-size:11px;font-weight:700;color:var(--muted);margin:0 0 3px}
 input[type=number],select{width:100%;padding:8px;border:1px solid var(--line);border-radius:9px;font-size:14px;background:#fff;color:var(--ink)}
-.quickbar{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:7px}
+.quickbar{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:7px}.quickbar-three{grid-template-columns:1.05fr 1.05fr .9fr}
 .primary,.secondary{width:100%;padding:11px;border-radius:10px;font-size:14px;font-weight:800}
 .primary{border:0;background:#181818;color:#fff}
 .secondary{border:1px solid #ccd2da;background:#fff;color:var(--ink)}
@@ -1456,6 +1647,8 @@ table{width:100%;border-collapse:collapse;font-size:12px}
 th,td{padding:8px 6px;border-bottom:1px solid #eceff3;text-align:left;white-space:nowrap}
 th{font-size:11px}
 .badge{padding:4px 7px;border-radius:999px;background:#eef2f7;font-size:11px}
+.usd-value{color:#159447;font-weight:800}
+.usd-rate{color:#159447;font-weight:700}
 .listing-clickable{cursor:pointer}
 .info-bottom{margin-top:12px}
 .actions-sticky{position:sticky;bottom:8px;z-index:20;background:rgba(244,245,247,.92);backdrop-filter:blur(8px);padding:5px;border-radius:12px;display:grid;grid-template-columns:1.2fr .8fr;gap:6px}
@@ -1548,7 +1741,7 @@ summary{padding:6px 8px;font-size:12.5px}
 .grid .rowitem{padding:4px;min-height:29px}
 .grid .rowname{font-size:11.5px}
 
-.quickbar{gap:4px;margin-bottom:4px}
+.quickbar{gap:4px;margin-bottom:4px}.quickbar-three{grid-template-columns:1.05fr 1.05fr .9fr}
 .field{font-size:10px;margin-bottom:2px}
 input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 .filter-grid{gap:4px}
@@ -1610,14 +1803,23 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 </div>
 
 <div class="card">
-  <div class="quickbar">
+  <div class="quickbar quickbar-three">
     <div>
       <label class="field">İlan Tarihi</label>
       <select name="date_filter">
-        <option value="current">Tümü / güncel kayıt</option>
+        <option value="current">Güncel</option>
         <option value="7d">Son 1 hafta</option>
         <option value="30d">Son 1 ay</option>
         <option value="90d">Son 3 ay</option>
+      </select>
+    </div>
+    <div>
+      <label class="field">Mülk Tipi</label>
+      <select name="property_group">
+        <option value="residential_all">Konut Tümü</option>
+        <option value="apartment">Apartman / Daire</option>
+        <option value="villa">Villa / Müstakil</option>
+        <option value="commercial">İşyeri</option>
       </select>
     </div>
     <div>
@@ -1672,6 +1874,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
     <div class="metric"><div class="k">İlan</div><div class="v" id="mCount">-</div></div>
     <div class="metric"><div class="k">Medyan Fiyat</div><div class="v" id="mMedianPrice">-</div></div>
     <div class="metric"><div class="k">Ort. Fiyat</div><div class="v" id="mAvgPrice">-</div></div>
+    <div class="metric"><div class="k">Ort. Net $/m²</div><div class="v usd-value" id="mAvgNetUsdM2">-</div></div>
     <div class="metric"><div class="k">Ort. Net TL/m²</div><div class="v" id="mMedianNetM2">-</div></div>
     <div class="metric"><div class="k">Ort. Brüt TL/m²</div><div class="v" id="mMedianM2">-</div></div>
     <div class="metric"><div class="k">Ort. Yaş</div><div class="v" id="mAvgAge">-</div></div>
@@ -1685,7 +1888,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
       <thead>
         <tr>
           <th>Mahalle</th><th>Oda</th><th>Yaş</th>
-          <th>Net m²</th><th>Net TL/m²</th><th>Fiyat</th>
+          <th>Net m²</th><th class="usd-value">Net $/m²</th><th>Net TL/m²</th><th>Fiyat</th>
           <th>Brüt TL/m²</th><th>Brüt m²</th>
           <th>İlan Tarihi</th><th>İlan ID</th><th>PAS</th>
         </tr>
@@ -1703,7 +1906,7 @@ Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
 Canlı güncellemede seçilen tarih aralığının tamamı taranır; 20 ilanlık sonuç kesmesi kullanılmaz.
-Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize.</div>
+Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
 
@@ -1712,7 +1915,7 @@ Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösteri
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_state_v416";
+const STATE_KEY="hlf_pas_state_v419";
 
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
@@ -1729,6 +1932,9 @@ function esc(s){
 }
 function money(n){
   return n==null?"-":new Intl.NumberFormat("tr-TR").format(n)+" ₺";
+}
+function usdMoney(n){
+  return n==null?"-":"$"+new Intl.NumberFormat("tr-TR",{maximumFractionDigits:0}).format(n);
 }
 function sideValue(){
   return document.querySelector('input[name="side"]:checked')?.value||"all";
@@ -1922,6 +2128,7 @@ function formPayload(){
     districts:[...selectedDistricts],
     neighborhoods:selectedNeighborhoods,
     date_filter:fd.get("date_filter")||"current",
+    property_group:fd.get("property_group")||"residential_all",
     rooms:fd.get("rooms")||"",
     min_m2:fd.get("min_m2")||"",
     max_m2:fd.get("max_m2")||"",
@@ -1952,6 +2159,7 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
     document.getElementById("mMedianPrice").textContent=money(data.analysis.median_price);
     document.getElementById("mAvgPrice").textContent=money(data.analysis.avg_price);
     document.getElementById("mMedianM2").textContent=money(data.analysis.avg_gross_m2_price);
+    document.getElementById("mAvgNetUsdM2").textContent=usdMoney(data.analysis.avg_net_usd_m2);
     document.getElementById("mMedianNetM2").textContent=money(data.analysis.avg_net_m2_price);
     document.getElementById("mAvgAge").textContent=
       data.analysis.avg_building_age==null?"-":data.analysis.avg_building_age+" yıl";
@@ -1966,6 +2174,7 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
         <td>${esc(r.rooms||"-")}</td>
         <td>${r.building_age==null?"-":r.building_age}</td>
         <td>${r.net_m2==null?"-":r.net_m2}</td>
+        <td class="usd-value">${usdMoney(r.net_usd_m2)}</td>
         <td>${money(r.net_price_m2)}</td>
         <td>${money(r.price)}</td>
         <td>${money(r.gross_price_m2)}</td>
@@ -2025,7 +2234,7 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
 function collectState(){
   const fd=new FormData(document.getElementById("pasForm")), filters={};
   [
-    "date_filter","rooms","min_m2","max_m2","min_price","max_price",
+    "date_filter","property_group","rooms","min_m2","max_m2","min_price","max_price",
     "building_age_min","building_age_max",
     "net_m2_min","net_m2_max","gross_m2_min","gross_m2_max"
   ].forEach(k=>filters[k]=fd.get(k)||"");
@@ -2140,17 +2349,27 @@ def api_search():
         analysis = analyze(listings)
         opportunity = {str(x["id"]): x for x in opportunity_analysis(listings)}
 
+        usd_try_rate = get_usd_try_rate()
+
         rows = []
         for item in listings:
             row = item.to_dict()
             row.update(opportunity.get(str(item.id), {}))
             row["url"] = getattr(item, "_listing_url", "")
+            row["net_usd_m2"] = try_to_usd(item.net_price_m2, usd_try_rate)
             rows.append(row)
+
+        analysis["avg_net_usd_m2"] = try_to_usd(
+            analysis.get("avg_net_m2_price"),
+            usd_try_rate
+        )
 
         return jsonify(
             ok=True,
             provider="PostgreSQL",
             version=VERSION,
+            usd_try_rate=usd_try_rate,
+            usd_try_source=_usd_try_cache.get("source"),
             analysis=analysis,
             listings=rows
         )
@@ -2168,6 +2387,7 @@ def api_sync():
 
         filters = {
             "date_filter": payload.get("date_filter", "current"),
+            "property_group": payload.get("property_group", "residential_all"),
             "rooms": payload.get("rooms", ""),
             "min_m2": payload.get("min_m2", ""),
             "max_m2": payload.get("max_m2", ""),
@@ -2308,6 +2528,8 @@ def api_provider_status():
         net_m2_price_formula="price / net_m2",
         gross_m2_price_formula="price / gross_m2",
         listing_url_id_validation=True,
+        usd_try_source="TCMB ForexSelling",
+        usd_try_cache_minutes=USD_TRY_CACHE_MINUTES,
     )
 
 
