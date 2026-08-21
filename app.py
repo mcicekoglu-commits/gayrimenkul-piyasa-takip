@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.24-location-price-locked"
+VERSION = "v4.26-pinned-neighborhood-favorites"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -1861,6 +1861,7 @@ h1{font-size:28px}
 }
 #favoriteNeighborhoods:has(.chip){
   min-height:39px;
+  display:grid!important;
 }
 .favorite-section{
   display:grid!important;
@@ -2072,7 +2073,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 100 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. v4.24 öncesi konum/fiyat doğrulaması olmayan kayıtlar sonuçlardan tamamen gizlenir.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 100 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. v4.24 öncesi konum/fiyat doğrulaması olmayan kayıtlar sonuçlardan tamamen gizlenir. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Favori mahalleler, yıldızdan çıkarılana kadar ana ekranda sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -2082,7 +2083,21 @@ Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösteri
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_state_v424";
+const STATE_KEY="hlf_pas_state";
+const LEGACY_STATE_KEYS=[
+  "hlf_pas_state_v424",
+  "hlf_pas_state_v423",
+  "hlf_pas_state_v422",
+  "hlf_pas_state_v421",
+  "hlf_pas_state_v420",
+  "hlf_pas_state_v419",
+  "hlf_pas_state_v418",
+  "hlf_pas_state_v417",
+  "hlf_pas_state_v416",
+  "hlf_pas_state_v415",
+  "hlf_pas_state_v414",
+  "hlf_pas_state_v49"
+];
 
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
@@ -2188,29 +2203,46 @@ function renderDistricts(){
 }
 
 function renderFavorites(){
-  const visibleFavDistricts=DISTRICTS.filter(d=>sideVisible(d)&&favoriteDistricts.has(d.name));
+  const visibleFavDistricts=DISTRICTS.filter(
+    d=>sideVisible(d)&&favoriteDistricts.has(d.name)
+  );
+
   const fd=document.getElementById("favoriteDistricts");
-  fd.innerHTML=visibleFavDistricts.length?visibleFavDistricts.map(d=>{
-    return `<div class="chip">
-      <input type="checkbox" ${selectedDistricts.has(d.name)?"checked":""}
-       onchange="setDistrictSelected('${esc(d.name)}',this.checked)">
-      <span>${esc(d.name)}</span>
-      <button class="star on" type="button" onclick="toggleFavDistrict('${esc(d.name)}')">★</button>
-    </div>`;
-  }).join(""):`<span class="small">Favori ilçe yok</span>`;
+  fd.innerHTML=visibleFavDistricts.length
+    ? visibleFavDistricts.map(d=>{
+        return `<div class="chip">
+          <input type="checkbox" ${selectedDistricts.has(d.name)?"checked":""}
+           onchange="setDistrictSelected('${esc(d.name)}',this.checked)">
+          <span>${esc(d.name)}</span>
+          <button class="star on" type="button"
+            onclick="toggleFavDistrict('${esc(d.name)}')">★</button>
+        </div>`;
+      }).join("")
+    : `<span class="small">Favori ilçe yok</span>`;
 
   const nbRows=[];
 
-  // v4.21:
-  // Üstte yalnız SEÇİLİ ilçelere ait favori mahalleleri göster.
-  // Birden fazla ilçe seçiliyse o ilçelerin favori mahalleleri aynı üst alanda
-  // sabit kalır. Böylece ilçe favorileri gibi mahalle favorileri de hızlı erişimdedir.
-  for(const d of DISTRICTS.filter(x=>sideVisible(x)&&selectedDistricts.has(x.name))){
-    for(const n of (favoriteNeighborhoods[d.name]||[])){
-      const checked=new Set(selectedNeighborhoods[d.name]||[]).has(n);
-      const jd=JSON.stringify(d.name), jn=JSON.stringify(n);
+  // v4.26:
+  // Favori mahalle, hangi ilçe o anda seçili olursa olsun ana ekranda sabit kalır.
+  // Ancak Tümü/Anadolu/Avrupa görünümüne saygı gösterir.
+  // Favoriye alındığı anda görünür; yıldızdan çıkarılana kadar kaybolmaz.
+  for(const d of DISTRICTS.filter(sideVisible)){
+    const favs=Array.isArray(favoriteNeighborhoods[d.name])
+      ? favoriteNeighborhoods[d.name]
+      : [];
 
-      nbRows.push(`<div class="chip" title="${esc(d.name)} · ${esc(n)}">
+    for(const n of favs){
+      if(!(NEIGHBORHOODS[d.name]||[]).includes(n))continue;
+
+      const checked=new Set(
+        selectedNeighborhoods[d.name]||[]
+      ).has(n);
+
+      const jd=JSON.stringify(d.name);
+      const jn=JSON.stringify(n);
+
+      nbRows.push(`<div class="chip favorite-nb-chip"
+        title="${esc(d.name)} · ${esc(n)}">
         <input type="checkbox" ${checked?"checked":""}
           onchange='setNeighborhoodSelected(${jd},${jn},this.checked)'>
         <span>${esc(n)}</span>
@@ -2224,7 +2256,7 @@ function renderFavorites(){
   document.getElementById("favoriteNeighborhoods").innerHTML=
     nbRows.length
       ? nbRows.join("")
-      : `<span class="small">Seçili ilçelerde favori mahalle yok</span>`;
+      : `<span class="small">Favori mahalle yok</span>`;
 }
 
 function renderNeighborhoodArea(){
@@ -2433,32 +2465,112 @@ function saveState(){
 }
 
 function loadState(){
-  let saved=null;
-  try{saved=JSON.parse(localStorage.getItem(STATE_KEY)||"null");}catch(_e){}
-  if(!saved){
+  const states=[];
+
+  // Kalıcı anahtar + eski sürümler: bulunanların hepsini oku.
+  for(const key of [STATE_KEY,...LEGACY_STATE_KEYS]){
+    try{
+      const raw=localStorage.getItem(key);
+      if(!raw)continue;
+      const parsed=JSON.parse(raw);
+      if(parsed&&typeof parsed==="object"){
+        states.push({key,data:parsed});
+      }
+    }catch(_e){}
+  }
+
+  if(!states.length){
     renderAll();
     return;
   }
 
-  const sideEl=document.querySelector(`input[name="side"][value="${saved.side||"all"}"]`);
+  // Seçimler/filtreler için en güncel bulunan state'i kullan.
+  // Liste sırası STATE_KEY, sonra yeni -> eski legacy şeklindedir.
+  const saved=states[0].data;
+
+  const sideEl=document.querySelector(
+    `input[name="side"][value="${saved.side||"all"}"]`
+  );
   if(sideEl)sideEl.checked=true;
 
   selectedDistricts=new Set(
-    (saved.districts||[]).filter(d=>DISTRICTS.some(x=>x.name===d))
+    (saved.districts||[]).filter(
+      d=>DISTRICTS.some(x=>x.name===d)
+    )
   );
-  selectedNeighborhoods=saved.neighborhoods||{};
-  favoriteDistricts=new Set(
-    Array.isArray(saved.favoriteDistricts)?saved.favoriteDistricts:defaultFavoriteDistricts
+
+  selectedNeighborhoods=
+    saved.neighborhoods&&typeof saved.neighborhoods==="object"
+      ? saved.neighborhoods
+      : {};
+
+  openDistricts=new Set(
+    (saved.openDistricts||[]).filter(
+      d=>DISTRICTS.some(x=>x.name===d)
+    )
   );
-  favoriteNeighborhoods=saved.favoriteNeighborhoods||{};
-  openDistricts=new Set(saved.openDistricts||[]);
 
   Object.entries(saved.filters||{}).forEach(([name,value])=>{
     const el=document.querySelector(`[name="${name}"]`);
     if(el)el.value=value||"";
   });
 
+  // FAVORİLER için ilk bulunan state'e güvenme:
+  // Tüm eski sürümlerdeki favorileri birleştir.
+  const mergedFavDistricts=new Set(defaultFavoriteDistricts);
+  const mergedFavNeighborhoods={};
+
+  for(const d of DISTRICTS){
+    mergedFavNeighborhoods[d.name]=new Set();
+  }
+
+  for(const entry of states){
+    const st=entry.data||{};
+
+    if(Array.isArray(st.favoriteDistricts)){
+      for(const d of st.favoriteDistricts){
+        if(DISTRICTS.some(x=>x.name===d)){
+          mergedFavDistricts.add(d);
+        }
+      }
+    }
+
+    const fns=
+      st.favoriteNeighborhoods&&typeof st.favoriteNeighborhoods==="object"
+        ? st.favoriteNeighborhoods
+        : {};
+
+    for(const d of DISTRICTS){
+      const allowed=new Set(NEIGHBORHOODS[d.name]||[]);
+      const vals=Array.isArray(fns[d.name])?fns[d.name]:[];
+
+      for(const n of vals){
+        if(allowed.has(n)){
+          mergedFavNeighborhoods[d.name].add(n);
+        }
+      }
+    }
+  }
+
+  favoriteDistricts=mergedFavDistricts;
+  favoriteNeighborhoods={};
+
+  for(const d of DISTRICTS){
+    favoriteNeighborhoods[d.name]=[
+      ...mergedFavNeighborhoods[d.name]
+    ];
+  }
+
   renderAll();
+
+  // Birleştirilmiş son hali kalıcı anahtara yaz.
+  // Bundan sonraki sürümlerde aynı favoriler korunur.
+  try{
+    localStorage.setItem(
+      STATE_KEY,
+      JSON.stringify(collectState())
+    );
+  }catch(_e){}
 }
 
 document.querySelectorAll('input[name="side"]').forEach(el=>{
