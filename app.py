@@ -33,7 +33,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.13-real-estate-engine"
+VERSION = "v4.14-verified-only"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -495,28 +495,28 @@ def _price_candidate(mapping, *keys):
 
 def extract_real_price(item, raw):
     """
-    Satış fiyatını doğrudan ilan özetindeki formattedPrice alanından alır.
-    Hazır m² fiyatı veya belirsiz 'amount' alanları kullanılmaz.
+    v4.14: Tek gerçek fiyat kaynağı Actor'ın numeric `price` alanıdır.
+    formattedPrice varsa yalnız çapraz doğrulama için kullanılır.
+    İkisi uyuşmazsa ilan reddedilir.
     """
-    for source in (item, raw):
-        if not isinstance(source, dict):
-            continue
+    if not isinstance(item, dict):
+        return None
 
-        # Sahibinden Real Estate Scraper'da gerçek satış fiyatı.
-        formatted = source.get("formattedPrice")
-        if formatted not in (None, ""):
-            value = parse_int(formatted)
-            if value and value > 0:
-                return value
+    price = parse_int(item.get("price"))
+    if price is None or price <= 0:
+        return None
 
-        # Güvenli yedek alanlar.
-        for key in ("salePrice", "priceValue", "listingPrice", "classifiedPrice", "price"):
-            if source.get(key) not in (None, ""):
-                value = parse_int(source.get(key))
-                if value and value > 0:
-                    return value
+    formatted = item.get("formattedPrice")
+    if formatted not in (None, ""):
+        formatted_value = parse_int(formatted)
+        if formatted_value is None or formatted_value != price:
+            return None
 
-    return None
+    currency = str(item.get("currency") or "TRY").strip().upper()
+    if currency not in ("TRY", "TL"):
+        return None
+
+    return price
 
 
 def parse_building_age(value):
@@ -726,6 +726,30 @@ def save_listings_to_db(listings):
     return {"saved": new_count + updated_count, "new": new_count, "updated": updated_count}
 
 
+
+def retire_legacy_scope_records(district, neighborhood):
+    """
+    Eski Search Scraper sürümlerinden kalan kayıtları silmez;
+    yalnız sonuç ekranından çıkarılmaları için pasif yapar.
+    Yeni Real Estate Actor kayıtlarına dokunmaz.
+    """
+    if not db_configured():
+        return 0
+    init_db()
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE pas_listings
+                SET active=FALSE, updated_at=NOW()
+                WHERE district=%s
+                  AND neighborhood=%s
+                  AND source<>'sahibinden-real-estate'
+                  AND active=TRUE
+            """, (district, neighborhood))
+            count = cur.rowcount or 0
+        conn.commit()
+    return count
+
 def record_sync_state(district, neighborhood, result_count=0, error=""):
     if not db_configured():
         return
@@ -896,7 +920,7 @@ def load_listings_from_db(filters):
                 SELECT id,district,neighborhood,title,price,gross_m2,net_m2,
                        rooms,listing_date,building_age,source,url
                 FROM pas_listings
-                WHERE active=TRUE AND district=ANY(%s)
+                WHERE active=TRUE AND source='sahibinden-real-estate' AND district=ANY(%s)
                 ORDER BY listing_date DESC, updated_at DESC
             """, (districts,))
             rows = cur.fetchall()
@@ -1132,6 +1156,10 @@ class NeighborhoodApifyProvider:
         if not listing_id:
             listing_id = extract_listing_id_from_url(listing_url)
         if not listing_id or not valid_listing_url(listing_url, listing_id):
+            return None
+
+        status = str(item.get("status") or "active").strip().casefold()
+        if status and status not in ("active", "aktif"):
             return None
 
         price = extract_real_price(item, raw)
@@ -1598,7 +1626,7 @@ Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
 Canlı güncellemede varsayılan sonuç sınırı {{ live_limit }}'dir.
-Fiyat, Net TL/m² ve Brüt TL/m² PAS tarafından gerçek ilan fiyatı ve gerçek m² alanlarından yeniden hesaplanır; kaynağın hazır m² fiyatı kullanılmaz.</div>
+Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize.</div>
   </details>
 </div>
 
@@ -1607,7 +1635,7 @@ Fiyat, Net TL/m² ve Brüt TL/m² PAS tarafından gerçek ilan fiyatı ve gerçe
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_state_v413";
+const STATE_KEY="hlf_pas_state_v414";
 
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
@@ -1900,7 +1928,8 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
     showSuccess(
       `${neighborhood}: ${data.raw_received} ham ilan geldi; `+
       `${data.accepted} doğrulanmış ilan kabul edildi. `+
-      `${data.new} yeni, ${data.updated} güncellendi.`
+      `${data.new} yeni, ${data.updated} güncellendi. `+
+      `${data.retired_legacy||0} eski doğrulanmamış kayıt sonuçlardan çıkarıldı.`
     );
 
     document.getElementById("pasForm").requestSubmit();
@@ -2125,6 +2154,7 @@ def api_sync():
                 start_url=result["start_url"],
             ), 409
 
+        retired_legacy = retire_legacy_scope_records(district, neighborhood)
         saved = save_listings_to_db(accepted)
         save_query_sync(query_key, district, neighborhood, result["raw_count"])
 
@@ -2148,6 +2178,7 @@ def api_sync():
             start_url=result["start_url"],
             sync_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
             cached=False,
+            retired_legacy=retired_legacy,
             **saved,
         )
 
