@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.21-favorite-neighborhoods"
+VERSION = "v4.22-cost-safe-district-cache"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -175,9 +175,7 @@ def env_float(name, default):
         return default
 
 
-LIVE_NEIGHBORHOOD_MAX_RESULTS = max(
-    1, min(env_int("PAS_SYNC_MAX_RESULTS", 20), 200)
-)
+LIVE_NEIGHBORHOOD_MAX_RESULTS = max(1, min(env_int("PAS_SYNC_MAX_RESULTS", 100), 100))
 SYNC_CACHE_HOURS = max(
     1, min(env_int("PAS_SYNC_CACHE_HOURS", 6), 72)
 )
@@ -185,9 +183,7 @@ SYNC_CACHE_HOURS = max(
 
 # Bir canlı güncellemenin toplam Apify maliyetine üst sınır.
 # Sahibinden Real Estate Scraper 20 özet ilan için normalde bunun çok altında kalmalıdır.
-APIFY_MAX_TOTAL_CHARGE_USD = max(
-    0.10, min(env_float("PAS_APIFY_MAX_TOTAL_CHARGE_USD", 0.25), 2.00)
-)
+APIFY_MAX_TOTAL_CHARGE_USD = max(0.10, min(env_float("PAS_APIFY_MAX_TOTAL_CHARGE_USD", 1.25), 1.25))
 
 
 
@@ -670,6 +666,45 @@ def valid_area(gross_m2, net_m2):
     return gross_m2, net_m2
 
 
+def resolve_known_neighborhood(item, raw, district):
+    """
+    Actor mahalleyi quarter/neighborhood/address alanlarının farklı birinde
+    döndürebiliyor. İlçenin bilinen mahalle listesinden en güvenilir eşleşmeyi bulur.
+    """
+    candidates = []
+
+    def add(v):
+        if v in (None, ""):
+            return
+        if isinstance(v, (list, tuple)):
+            for x in v:
+                add(x)
+            return
+        candidates.append(str(v))
+
+    for source in (item, raw):
+        if not isinstance(source, dict):
+            continue
+        for key in (
+            "quarter", "neighborhood", "neighbourhood", "neighborhoodName",
+            "address", "location", "locationText", "fullAddress"
+        ):
+            add(source.get(key))
+
+    haystack = " | ".join(candidates)
+    hay_slug = slug(haystack)
+
+    # Önce tam/uzun isimleri dene; benzer isimlerde yanlış eşleşmeyi azaltır.
+    known = sorted(NEIGHBORHOODS.get(district, []), key=len, reverse=True)
+    for nb in known:
+        nb_slug = slug(nb)
+        if nb_slug and nb_slug in hay_slug:
+            return nb
+
+    return ""
+
+
+
 # =========================================================
 # LISTING MODEL
 # =========================================================
@@ -891,10 +926,15 @@ def record_sync_state(district, neighborhood, result_count=0, error=""):
 
 
 def make_query_key(district, neighborhood, filters):
+    """
+    v4.22: Actor mahalle filtresi desteklemiyor; ücretli sorgunun gerçek kapsamı
+    ilçe + tarih + kaynakta uygulanabilen filtrelerdir. Bu nedenle aynı ilçe için
+    farklı mahalle seçmek yeni bir ücretli sorgu başlatmamalı.
+    """
     relevant = {
         "engine_version": VERSION,
+        "scope": "district",
         "district": district,
-        "neighborhood": neighborhood,
         "property_group": str(filters.get("property_group") or "residential_all"),
         "rooms": str(filters.get("rooms") or ""),
         "min_m2": str(filters.get("min_m2") or ""),
@@ -903,11 +943,8 @@ def make_query_key(district, neighborhood, filters):
         "max_price": str(filters.get("max_price") or ""),
         "building_age_min": str(filters.get("building_age_min") or ""),
         "building_age_max": str(filters.get("building_age_max") or ""),
-        "net_m2_min": str(filters.get("net_m2_min") or ""),
-        "net_m2_max": str(filters.get("net_m2_max") or ""),
-        "gross_m2_min": str(filters.get("gross_m2_min") or ""),
-        "gross_m2_max": str(filters.get("gross_m2_max") or ""),
         "date_filter": str(filters.get("date_filter") or "current"),
+        "hard_max_results": LIVE_NEIGHBORHOOD_MAX_RESULTS,
     }
     return json.dumps(relevant, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -1197,13 +1234,20 @@ class NeighborhoodApifyProvider:
             filters.get("property_group") or "residential_all"
         ).strip()
 
+        limit = max(
+            1,
+            min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), 100)
+        )
+
         actor_input = {
             "listingType": "Sale",
             "city": "Istanbul",
             "district": [district],
             "sortBy": "Newest",
             "extractPhoneNumbers": False,
-            "maxResults": 0,
+            # KRİTİK MALİYET KORUMASI:
+            # 0 = sınırsızdı ve 496 gibi pahalı taramalara yol açıyordu.
+            "maxResults": limit,
         }
 
         if property_group == "commercial":
@@ -1263,7 +1307,9 @@ class NeighborhoodApifyProvider:
         params = {
             "clean": "true",
             "format": "json",
-            "limit": "5000",
+            "limit": str(limit),
+            "maxItems": str(limit),
+            "maxTotalChargeUsd": f"{APIFY_MAX_TOTAL_CHARGE_USD:.2f}",
             "timeout": str(self.timeout),
         }
 
@@ -1305,25 +1351,21 @@ class NeighborhoodApifyProvider:
 
         city = normalize_place(self._pick(item, "city", "cityName") or self._pick(raw, "city", "cityName") or "")
         district = normalize_place(self._pick(item, "district", "districtName") or self._pick(raw, "district", "districtName") or "")
-        neighborhood = normalize_place(
-            self._pick(item, "quarter")
-            or self._pick(raw, "quarter")
-            or self._pick(item, "neighborhood", "neighbourhood", "neighborhoodName")
-            or self._pick(raw, "neighborhood", "neighbourhood", "neighborhoodName")
-            or ""
-        )
-
-        # v4.17: Actor bazen mahalleyi quarter/neighborhood/address alanlarından
-        # farklı birinde döndürüyor. Tek bir alana bakıp gerçek ilanı eleme.
-        if not item_matches_requested_location(
-            item, raw, fallback_district, fallback_neighborhood
-        ):
+        # Actor'ın gerçek ücretli kapsamı ilçe. O yüzden gelen 100 kaydın
+        # tümünü doğru mahalleleriyle DB'ye yazıyoruz; seçilen mahalle sonra DB'de süzülür.
+        if slug(city) not in ("istanbul", ""):
+            return None
+        if district and slug(district) != slug(fallback_district):
             return None
 
-        # DB'de kullanıcının seçtiği standart mahalle adını sakla.
+        neighborhood = resolve_known_neighborhood(
+            item, raw, fallback_district
+        )
+        if not neighborhood:
+            return None
+
         city = "İstanbul"
         district = fallback_district
-        neighborhood = fallback_neighborhood
 
         listing_url = str(
             self._pick(item, "url", "listingUrl", "href", "sourceUrl")
@@ -1449,7 +1491,7 @@ class NeighborhoodApifyProvider:
             max_results=max_results,
         )
 
-        accepted = []
+        accepted_all = []
         rejected = {
             "parse_or_validation": 0,
             "outside_date_range": 0,
@@ -1463,9 +1505,6 @@ class NeighborhoodApifyProvider:
                 rejected["parse_or_validation"] += 1
                 continue
 
-            # v4.17: Actor'a listingDate gönderiyoruz, ama PAS da ikinci kez
-            # kendi tarafında tarihi doğruluyor. Böylece "Son 1 hafta" seçimi
-            # gerçekten son 7 günlük ilanları kabul eder.
             if not listing_date_is_allowed(
                 item.listing_date, (filters or {}).get("date_filter")
             ):
@@ -1475,12 +1514,21 @@ class NeighborhoodApifyProvider:
             if item.id in seen:
                 rejected["duplicate_id"] += 1
                 continue
+
             seen.add(item.id)
-            accepted.append(item)
+            accepted_all.append(item)
+
+        # Kullanıcının seçtiği mülk tipi/oda vb. filtreler hedef sonuç için uygulanır.
+        target_items = [
+            item for item in accepted_all
+            if slug(item.neighborhood) == slug(neighborhood)
+            and listing_matches_filters(item, filters or {})
+        ]
 
         return {
             "raw_count": len(raw_items),
-            "accepted": accepted,
+            "accepted_all": accepted_all,
+            "accepted": target_items,
             "rejected": rejected,
             "actor_input": actor_input,
             "start_url": start_url,
@@ -1919,7 +1967,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede seçilen tarih aralığının tamamı taranır; 20 ilanlık sonuç kesmesi kullanılmaz.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 100 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -1929,7 +1977,7 @@ Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösteri
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_state_v421";
+const STATE_KEY="hlf_pas_state_v422";
 
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
@@ -2241,8 +2289,8 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
     if(!result.ok||!data.ok)throw new Error(data.error||("Güncelleme başarısız. HTTP "+result.status));
 
     showSuccess(
-      `${neighborhood}: seçilen dönemde ${data.raw_received} ilçe ilanı tarandı; `+
-      `${data.accepted} doğrulanmış mahalle ilanı kabul edildi. `+
+      `${district}: en fazla ${data.hard_limit||100} ilan sınırıyla ${data.raw_received} ilan tarandı; `+
+      `${neighborhood} için ${data.accepted} doğrulanmış ilan bulundu. `+
       `${data.new} yeni, ${data.updated} güncellendi. `+
       `${data.retired_legacy||0} eski doğrulanmamış kayıt sonuçlardan çıkarıldı.`
     );
@@ -2456,25 +2504,28 @@ def api_sync():
             max_results=LIVE_NEIGHBORHOOD_MAX_RESULTS,
         )
 
-        # URL'de uygulanamayan filtreleri burada yeniden kontrol et.
-        accepted = [
-            item for item in result["accepted"]
-            if listing_matches_filters(item, filters)
-        ]
+        accepted = result["accepted"]
+        accepted_all = result.get("accepted_all") or []
 
         if not accepted:
+            # Ücret zaten oluştuğu için doğrulanmış ilçe kayıtlarını boşa atma.
+            saved_all = save_listings_to_db(accepted_all) if accepted_all else {
+                "saved": 0, "new": 0, "updated": 0
+            }
+            save_query_sync(query_key, district, neighborhood, result["raw_count"])
+
             period_label = {
                 "current": "Son 24 saat",
                 "7d": "Son 7 gün",
                 "30d": "Son 30 gün",
                 "90d": "Son 90 gün",
             }.get(str(filters.get("date_filter") or "current"), "Seçili dönem")
+
             message = (
-                f"{district} / {neighborhood}: {period_label} sorgusunda "
-                f"{result['raw_count']} ham sonuç döndü; "
-                f"mülk tipi={filters.get('property_group','residential_all')}. "
-                "Mahalle/tarih/URL/fiyat/m² doğrulaması ve seçili filtrelerden "
-                "sonra kaydedilecek ilan kalmadı."
+                f"{district}: {period_label} için en fazla "
+                f"{LIVE_NEIGHBORHOOD_MAX_RESULTS} ilan tarandı; "
+                f"{neighborhood} için uygun ilan ilk {LIVE_NEIGHBORHOOD_MAX_RESULTS} "
+                "kayıt içinde bulunamadı. Aynı ilçe bu cache süresinde tekrar ücretli taranmayacak."
             )
             record_sync_state(district, neighborhood, 0, message)
 
@@ -2482,12 +2533,16 @@ def api_sync():
                 ok=False,
                 error=message,
                 raw_received=result["raw_count"],
+                district_verified=len(accepted_all),
                 rejected=result["rejected"],
                 start_url=result["start_url"],
+                hard_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
+                cached_district=True,
+                **saved_all,
             ), 409
 
         retired_legacy = retire_legacy_scope_records(district, neighborhood)
-        saved = save_listings_to_db(accepted)
+        saved = save_listings_to_db(accepted_all)
         save_query_sync(query_key, district, neighborhood, result["raw_count"])
 
         selected_filters = {
@@ -2505,10 +2560,12 @@ def api_sync():
             neighborhood=neighborhood,
             raw_received=result["raw_count"],
             accepted=len(accepted),
+            district_verified=len(accepted_all),
             rejected=result["rejected"],
             selected_neighborhood_count=selected_count,
             start_url=result["start_url"],
             sync_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
+            hard_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
             cached=False,
             retired_legacy=retired_legacy,
             **saved,
@@ -2558,6 +2615,11 @@ def api_provider_status():
         usd_try_source="TCMB ForexSelling",
         usd_try_cache_minutes=USD_TRY_CACHE_MINUTES,
         property_filter_strategy="broad-category-fetch + PAS local classification",
+        actor_scope="district",
+        neighborhood_filter_supported_by_actor=False,
+        hard_paid_result_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
+        district_shared_cache=True,
+        max_total_charge_usd=APIFY_MAX_TOTAL_CHARGE_USD,
     )
 
 
