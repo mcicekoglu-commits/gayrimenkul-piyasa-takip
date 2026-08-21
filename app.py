@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.26-pinned-neighborhood-favorites"
+VERSION = "v4.27-selected-district-favorites"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -2073,7 +2073,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 100 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. v4.24 öncesi konum/fiyat doğrulaması olmayan kayıtlar sonuçlardan tamamen gizlenir. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Favori mahalleler, yıldızdan çıkarılana kadar ana ekranda sabit görünür.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 100 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. v4.24 öncesi konum/fiyat doğrulaması olmayan kayıtlar sonuçlardan tamamen gizlenir. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -2222,11 +2222,13 @@ function renderFavorites(){
 
   const nbRows=[];
 
-  // v4.26:
-  // Favori mahalle, hangi ilçe o anda seçili olursa olsun ana ekranda sabit kalır.
-  // Ancak Tümü/Anadolu/Avrupa görünümüne saygı gösterir.
-  // Favoriye alındığı anda görünür; yıldızdan çıkarılana kadar kaybolmaz.
-  for(const d of DISTRICTS.filter(sideVisible)){
+  // v4.27:
+  // Üstte yalnız SEÇİLİ ilçelerin favori mahalleleri sabit görünür.
+  // Örn. Kadıköy seçiliyse sadece Kadıköy favori mahalleleri görünür.
+  // İlçe değişince bu alan otomatik o ilçenin favorilerine döner.
+  for(const d of DISTRICTS.filter(
+    x=>sideVisible(x)&&selectedDistricts.has(x.name)
+  )){
     const favs=Array.isArray(favoriteNeighborhoods[d.name])
       ? favoriteNeighborhoods[d.name]
       : [];
@@ -2256,7 +2258,7 @@ function renderFavorites(){
   document.getElementById("favoriteNeighborhoods").innerHTML=
     nbRows.length
       ? nbRows.join("")
-      : `<span class="small">Favori mahalle yok</span>`;
+      : `<span class="small">Seçili ilçelerde favori mahalle yok</span>`;
 }
 
 function renderNeighborhoodArea(){
