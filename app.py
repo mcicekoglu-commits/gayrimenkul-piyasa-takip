@@ -33,7 +33,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.14-verified-only"
+VERSION = "v4.15-full-period-sync"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -776,6 +776,7 @@ def record_sync_state(district, neighborhood, result_count=0, error=""):
 
 def make_query_key(district, neighborhood, filters):
     relevant = {
+        "engine_version": VERSION,
         "district": district,
         "neighborhood": neighborhood,
         "rooms": str(filters.get("rooms") or ""),
@@ -1055,7 +1056,6 @@ class NeighborhoodApifyProvider:
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
 
         filters = filters or {}
-        limit = max(1, min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), 200))
 
         actor_input = {
             "listingType": "Sale",
@@ -1065,13 +1065,25 @@ class NeighborhoodApifyProvider:
             "district": [district],
             "sortBy": "Newest",
             "extractPhoneNumbers": False,
-            "maxResults": limit,
+            "maxResults": 0,
         }
+
+        date_map = {
+            "current": "Last 24 hours",
+            "7d": "Last 7 days",
+            "30d": "Last 30 days",
+            "90d": "Last 30 days",
+        }
+        actor_input["listingDate"] = date_map.get(
+            str(filters.get("date_filter") or "current"),
+            "Last 24 hours"
+        )
 
         min_price = parse_int(filters.get("min_price"))
         max_price = parse_int(filters.get("max_price"))
         min_size = parse_int(filters.get("min_m2"))
         max_size = parse_int(filters.get("max_m2"))
+
         if min_price is not None:
             actor_input["minPrice"] = min_price
             actor_input["currency"] = "TRY"
@@ -1087,18 +1099,28 @@ class NeighborhoodApifyProvider:
         if room and room != "5+1 ve üzeri":
             actor_input["rooms"] = [room]
 
-        date_map = {"7d": "Last 7 days", "30d": "Last 30 days"}
-        if str(filters.get("date_filter") or "") in date_map:
-            actor_input["listingDate"] = date_map[str(filters.get("date_filter"))]
+        age_min = parse_int(filters.get("building_age_min"))
+        age_max = parse_int(filters.get("building_age_max"))
+        if age_min is not None and age_max is not None and 0 <= age_min <= age_max <= 31:
+            ages = []
+            for age in range(age_min, age_max + 1):
+                ages.append("0 (Ready)" if age == 0 else str(age))
+            if ages:
+                actor_input["buildingAge"] = ages
 
         params = {
-            "clean": "true", "format": "json",
-            "limit": str(limit), "timeout": str(self.timeout)
+            "clean": "true",
+            "format": "json",
+            "limit": "5000",
+            "timeout": str(self.timeout),
         }
+
         url = (
             f"https://api.apify.com/v2/acts/{self.actor_id}"
-            "/run-sync-get-dataset-items?" + urlencode(params)
+            "/run-sync-get-dataset-items?"
+            + urlencode(params)
         )
+
         req = Request(
             url,
             data=json.dumps(actor_input, ensure_ascii=False).encode("utf-8"),
@@ -1110,7 +1132,9 @@ class NeighborhoodApifyProvider:
             },
             method="POST"
         )
+
         payload = self._request_json(req)
+
         if isinstance(payload, list):
             rows = payload
         elif isinstance(payload, dict):
@@ -1119,6 +1143,7 @@ class NeighborhoodApifyProvider:
                 rows = []
         else:
             rows = []
+
         return rows, actor_input, f"actor://{self.actor_id}/Istanbul/{district}/{neighborhood}"
 
     def normalize_item(self, item, fallback_district, fallback_neighborhood):
@@ -1129,8 +1154,10 @@ class NeighborhoodApifyProvider:
         city = normalize_place(self._pick(item, "city", "cityName") or self._pick(raw, "city", "cityName") or "")
         district = normalize_place(self._pick(item, "district", "districtName") or self._pick(raw, "district", "districtName") or "")
         neighborhood = normalize_place(
-            self._pick(item, "neighborhood", "neighbourhood", "neighborhoodName", "quarter")
-            or self._pick(raw, "neighborhood", "neighbourhood", "neighborhoodName", "quarter")
+            self._pick(item, "quarter")
+            or self._pick(raw, "quarter")
+            or self._pick(item, "neighborhood", "neighbourhood", "neighborhoodName")
+            or self._pick(raw, "neighborhood", "neighbourhood", "neighborhoodName")
             or ""
         )
 
@@ -1625,7 +1652,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede varsayılan sonuç sınırı {{ live_limit }}'dir.
+Canlı güncellemede seçilen tarih aralığının tamamı taranır; 20 ilanlık sonuç kesmesi kullanılmaz.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize.</div>
   </details>
 </div>
@@ -1635,7 +1662,7 @@ Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösteri
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_state_v414";
+const STATE_KEY="hlf_pas_state_v415";
 
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
@@ -1926,8 +1953,8 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
     if(!result.ok||!data.ok)throw new Error(data.error||("Güncelleme başarısız. HTTP "+result.status));
 
     showSuccess(
-      `${neighborhood}: ${data.raw_received} ham ilan geldi; `+
-      `${data.accepted} doğrulanmış ilan kabul edildi. `+
+      `${neighborhood}: seçilen dönemde ${data.raw_received} ilçe ilanı tarandı; `+
+      `${data.accepted} doğrulanmış mahalle ilanı kabul edildi. `+
       `${data.new} yeni, ${data.updated} güncellendi. `+
       `${data.retired_legacy||0} eski doğrulanmamış kayıt sonuçlardan çıkarıldı.`
     );
@@ -2137,8 +2164,6 @@ def api_sync():
         ]
 
         if not accepted:
-            save_query_sync(query_key, district, neighborhood, result["raw_count"])
-
             message = (
                 f"{district} / {neighborhood}: {result['raw_count']} ham sonuç döndü; "
                 "URL/ID/fiyat/m² doğrulaması ve seçili filtrelerden sonra "
