@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.22-cost-safe-district-cache"
+VERSION = "v4.24-location-price-locked"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -599,25 +599,51 @@ def _price_candidate(mapping, *keys):
 
 def extract_real_price(item, raw):
     """
-    v4.14: Tek gerçek fiyat kaynağı Actor'ın numeric `price` alanıdır.
-    formattedPrice varsa yalnız çapraz doğrulama için kullanılır.
-    İkisi uyuşmazsa ilan reddedilir.
+    v4.24 PRICE LOCK
+
+    A listing is accepted only if:
+    - a positive numeric `price` exists in item or rawSummary,
+    - formattedPrice exists,
+    - every numeric price source agrees,
+    - every formatted price agrees with the numeric price,
+    - currency is TRY/TL when provided.
+
+    No guessing, no market threshold, no correcting a price.
+    If sources disagree, the listing is rejected.
     """
-    if not isinstance(item, dict):
+    sources = [x for x in (item, raw) if isinstance(x, dict)]
+
+    numeric_prices = []
+    formatted_prices = []
+    currencies = []
+
+    for source in sources:
+        if source.get("price") not in (None, ""):
+            p = parse_int(source.get("price"))
+            if p is not None and p > 0:
+                numeric_prices.append(p)
+
+        if source.get("formattedPrice") not in (None, ""):
+            fp = parse_int(source.get("formattedPrice"))
+            if fp is not None and fp > 0:
+                formatted_prices.append(fp)
+
+        if source.get("currency") not in (None, ""):
+            currencies.append(str(source.get("currency")).strip().upper())
+
+    # Numeric and formatted values are both mandatory.
+    if not numeric_prices or not formatted_prices:
         return None
 
-    price = parse_int(item.get("price"))
-    if price is None or price <= 0:
+    if len(set(numeric_prices)) != 1:
         return None
 
-    formatted = item.get("formattedPrice")
-    if formatted not in (None, ""):
-        formatted_value = parse_int(formatted)
-        if formatted_value is None or formatted_value != price:
-            return None
+    price = numeric_prices[0]
 
-    currency = str(item.get("currency") or "TRY").strip().upper()
-    if currency not in ("TRY", "TL"):
+    if any(fp != price for fp in formatted_prices):
+        return None
+
+    if currencies and any(c not in ("TRY", "TL", "₺") for c in currencies):
         return None
 
     return price
@@ -668,41 +694,72 @@ def valid_area(gross_m2, net_m2):
 
 def resolve_known_neighborhood(item, raw, district):
     """
-    Actor mahalleyi quarter/neighborhood/address alanlarının farklı birinde
-    döndürebiliyor. İlçenin bilinen mahalle listesinden en güvenilir eşleşmeyi bulur.
-    """
-    candidates = []
+    v4.23 strict location verification.
 
-    def add(v):
-        if v in (None, ""):
-            return
-        if isinstance(v, (list, tuple)):
-            for x in v:
-                add(x)
-            return
-        candidates.append(str(v))
+    Rules:
+    1) Explicit quarter/neighborhood fields have priority.
+    2) If an explicit neighborhood value exists, it MUST exactly map to one
+       known neighborhood of the selected district.
+    3) Address is used only when explicit neighborhood fields are absent.
+    4) Address must identify exactly ONE known neighborhood.
+    5) We NEVER replace an unknown location with the user's selected neighborhood.
+    """
+    known = NEIGHBORHOODS.get(district, [])
+    if not known:
+        return ""
+
+    known_by_slug = {slug(nb): nb for nb in known if slug(nb)}
+
+    explicit_values = []
+    address_values = []
 
     for source in (item, raw):
         if not isinstance(source, dict):
             continue
+
+        for key in ("quarter", "neighborhood", "neighbourhood", "neighborhoodName"):
+            value = source.get(key)
+            if value not in (None, ""):
+                explicit_values.append(str(value))
+
         for key in (
-            "quarter", "neighborhood", "neighbourhood", "neighborhoodName",
-            "address", "location", "locationText", "fullAddress"
+            "address", "location", "locationText",
+            "fullAddress", "addressNormalized"
         ):
-            add(source.get(key))
+            value = source.get(key)
+            if value not in (None, ""):
+                address_values.append(str(value))
 
-    haystack = " | ".join(candidates)
-    hay_slug = slug(haystack)
+    # Strong path: explicit neighborhood fields.
+    if explicit_values:
+        matches = set()
+        for value in explicit_values:
+            value_slug = slug(normalize_place(value))
 
-    # Önce tam/uzun isimleri dene; benzer isimlerde yanlış eşleşmeyi azaltır.
-    known = sorted(NEIGHBORHOODS.get(district, []), key=len, reverse=True)
-    for nb in known:
-        nb_slug = slug(nb)
-        if nb_slug and nb_slug in hay_slug:
-            return nb
+            # Exact normalized match.
+            if value_slug in known_by_slug:
+                matches.add(known_by_slug[value_slug])
+                continue
+
+            # Some providers return "X Mahallesi, Kadıköy" or similar.
+            for nb_slug, nb_name in known_by_slug.items():
+                if re.search(rf"(?:^|-){re.escape(nb_slug)}(?:-|$)", value_slug):
+                    matches.add(nb_name)
+
+        return next(iter(matches)) if len(matches) == 1 else ""
+
+    # Fallback path: no explicit neighborhood. Use address only if unambiguous.
+    if address_values:
+        address_slug = slug(" | ".join(address_values))
+        matches = set()
+
+        for nb_slug, nb_name in known_by_slug.items():
+            if re.search(rf"(?:^|-){re.escape(nb_slug)}(?:-|$)", address_slug):
+                matches.add(nb_name)
+
+        return next(iter(matches)) if len(matches) == 1 else ""
 
     return ""
-
 
 
 # =========================================================
@@ -722,6 +779,9 @@ class Listing:
     listing_date: str
     building_age: int | None = None
     property_group: str = "residential"
+    location_verified: bool = False
+    price_verified: bool = False
+    verification_version: int = 0
     source: str = "sahibinden-scraper-pro"
 
     @property
@@ -776,6 +836,9 @@ def init_db():
                     listing_date TEXT NOT NULL DEFAULT '',
                     building_age INTEGER,
                     property_group TEXT NOT NULL DEFAULT 'residential',
+                    location_verified BOOLEAN NOT NULL DEFAULT FALSE,
+                    price_verified BOOLEAN NOT NULL DEFAULT FALSE,
+                    verification_version INTEGER NOT NULL DEFAULT 0,
                     source TEXT NOT NULL DEFAULT '',
                     url TEXT NOT NULL DEFAULT '',
                     active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -787,6 +850,18 @@ def init_db():
             cur.execute("""
                 ALTER TABLE pas_listings
                 ADD COLUMN IF NOT EXISTS property_group TEXT NOT NULL DEFAULT 'residential'
+            """)
+            cur.execute("""
+                ALTER TABLE pas_listings
+                ADD COLUMN IF NOT EXISTS location_verified BOOLEAN NOT NULL DEFAULT FALSE
+            """)
+            cur.execute("""
+                ALTER TABLE pas_listings
+                ADD COLUMN IF NOT EXISTS price_verified BOOLEAN NOT NULL DEFAULT FALSE
+            """)
+            cur.execute("""
+                ALTER TABLE pas_listings
+                ADD COLUMN IF NOT EXISTS verification_version INTEGER NOT NULL DEFAULT 0
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS pas_sync_state (
@@ -837,11 +912,14 @@ def save_listings_to_db(listings):
                 cur.execute("""
                     INSERT INTO pas_listings (
                         id,district,neighborhood,title,price,gross_m2,net_m2,
-                        rooms,listing_date,building_age,property_group,source,url,active,
+                        rooms,listing_date,building_age,property_group,
+                        location_verified,price_verified,verification_version,
+                        source,url,active,
                         first_seen,last_seen,updated_at
                     )
                     VALUES (
-                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,
+                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                        %s,%s,%s,%s,%s,TRUE,
                         NOW(),NOW(),NOW()
                     )
                     ON CONFLICT (id) DO UPDATE SET
@@ -855,6 +933,9 @@ def save_listings_to_db(listings):
                         listing_date=CASE WHEN EXCLUDED.listing_date<>'' THEN EXCLUDED.listing_date ELSE pas_listings.listing_date END,
                         building_age=COALESCE(EXCLUDED.building_age,pas_listings.building_age),
                         property_group=EXCLUDED.property_group,
+                        location_verified=EXCLUDED.location_verified,
+                        price_verified=EXCLUDED.price_verified,
+                        verification_version=EXCLUDED.verification_version,
                         source=EXCLUDED.source,
                         url=EXCLUDED.url,
                         active=TRUE,
@@ -864,7 +945,11 @@ def save_listings_to_db(listings):
                     str(item.id), item.district, item.neighborhood, item.title or "",
                     item.price, item.gross_m2, item.net_m2, item.rooms or "",
                     item.listing_date or "", item.building_age,
-                    item.property_group or "residential", item.source or "", url
+                    item.property_group or "residential",
+                    bool(item.location_verified),
+                    bool(item.price_verified),
+                    int(item.verification_version or 0),
+                    item.source or "", url
                 ))
 
                 if exists:
@@ -1091,9 +1176,15 @@ def load_listings_from_db(filters):
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id,district,neighborhood,title,price,gross_m2,net_m2,
-                       rooms,listing_date,building_age,property_group,source,url
+                       rooms,listing_date,building_age,property_group,
+                       location_verified,price_verified,verification_version,source,url
                 FROM pas_listings
-                WHERE active=TRUE AND source='sahibinden-real-estate' AND district=ANY(%s)
+                WHERE active=TRUE
+                  AND location_verified=TRUE
+                  AND price_verified=TRUE
+                  AND verification_version>=24
+                  AND source='sahibinden-real-estate'
+                  AND district=ANY(%s)
                 ORDER BY listing_date DESC, updated_at DESC
             """, (districts,))
             rows = cur.fetchall()
@@ -1130,6 +1221,9 @@ def load_listings_from_db(filters):
             listing_date=normalize_listing_date(r["listing_date"]),
             building_age=parse_int(r["building_age"]),
             property_group=r["property_group"] or "residential",
+            location_verified=bool(r["location_verified"]),
+            price_verified=bool(r["price_verified"]),
+            verification_version=parse_int(r["verification_version"]) or 0,
             source=r["source"] or "cache",
         )
         item._listing_url = r["url"] or ""
@@ -1362,6 +1456,7 @@ class NeighborhoodApifyProvider:
             item, raw, fallback_district
         )
         if not neighborhood:
+            # Konum açıkça doğrulanamıyorsa ilanı kaydetme.
             return None
 
         city = "İstanbul"
@@ -1469,10 +1564,20 @@ class NeighborhoodApifyProvider:
             property_group = "residential"
 
         listing = Listing(
-            id=listing_id, district=fallback_district, neighborhood=fallback_neighborhood,
-            title=title, price=price, gross_m2=gross_m2, net_m2=net_m2,
-            rooms=rooms, listing_date=normalize_listing_date(listed_at),
-            building_age=building_age, property_group=property_group,
+            id=listing_id,
+            district=fallback_district,
+            neighborhood=neighborhood,
+            title=title,
+            price=price,
+            gross_m2=gross_m2,
+            net_m2=net_m2,
+            rooms=rooms,
+            listing_date=normalize_listing_date(listed_at),
+            building_age=building_age,
+            property_group=property_group,
+            location_verified=True,
+            price_verified=True,
+            verification_version=24,
             source="sahibinden-real-estate"
         )
         listing._listing_url = listing_url
@@ -1493,7 +1598,7 @@ class NeighborhoodApifyProvider:
 
         accepted_all = []
         rejected = {
-            "parse_or_validation": 0,
+            "strict_validation": 0,
             "outside_date_range": 0,
             "duplicate_id": 0,
         }
@@ -1502,7 +1607,7 @@ class NeighborhoodApifyProvider:
         for raw in raw_items:
             item = self.normalize_item(raw, district, neighborhood)
             if not item:
-                rejected["parse_or_validation"] += 1
+                rejected["strict_validation"] += 1
                 continue
 
             if not listing_date_is_allowed(
@@ -1967,7 +2072,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 100 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 100 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. v4.24 öncesi konum/fiyat doğrulaması olmayan kayıtlar sonuçlardan tamamen gizlenir.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -1977,7 +2082,7 @@ Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösteri
 <script>
 const DISTRICTS={{ districts_json|safe }};
 const NEIGHBORHOODS={{ neighborhoods_json|safe }};
-const STATE_KEY="hlf_pas_state_v422";
+const STATE_KEY="hlf_pas_state_v424";
 
 let selectedDistricts=new Set();
 let selectedNeighborhoods={};
@@ -2620,6 +2725,13 @@ def api_provider_status():
         hard_paid_result_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
         district_shared_cache=True,
         max_total_charge_usd=APIFY_MAX_TOTAL_CHARGE_USD,
+        strict_location_verification=True,
+        strict_price_cross_validation=True,
+        verification_version=24,
+        legacy_location_rows_quarantined=True,
+        legacy_price_rows_quarantined=True,
+        search_requires_location_verified=True,
+        search_requires_price_verified=True,
     )
 
 
