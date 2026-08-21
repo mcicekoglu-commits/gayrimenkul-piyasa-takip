@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.29-floor-filters"
+VERSION = "v4.30-history-7day"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -836,6 +836,7 @@ def init_db():
                     net_m2 INTEGER,
                     rooms TEXT NOT NULL DEFAULT '',
                     listing_date TEXT NOT NULL DEFAULT '',
+                    original_listing_date TEXT NOT NULL DEFAULT '',
                     building_age INTEGER,
                     total_floors INTEGER,
                     located_floor TEXT NOT NULL DEFAULT '',
@@ -850,6 +851,32 @@ def init_db():
                     last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
+            """)
+            cur.execute("""
+                ALTER TABLE pas_listings
+                ADD COLUMN IF NOT EXISTS original_listing_date TEXT NOT NULL DEFAULT ''
+            """)
+            cur.execute("""
+                UPDATE pas_listings
+                SET original_listing_date=listing_date
+                WHERE original_listing_date=''
+                  AND listing_date<>''
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS pas_listing_history (
+                    id BIGSERIAL PRIMARY KEY,
+                    listing_id TEXT NOT NULL,
+                    observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    listing_date TEXT NOT NULL DEFAULT '',
+                    price BIGINT,
+                    district TEXT NOT NULL DEFAULT '',
+                    neighborhood TEXT NOT NULL DEFAULT '',
+                    active BOOLEAN NOT NULL DEFAULT TRUE
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_pas_listing_history_listing
+                ON pas_listing_history (listing_id, observed_at DESC)
             """)
             cur.execute("""
                 ALTER TABLE pas_listings
@@ -924,13 +951,13 @@ def save_listings_to_db(listings):
                 cur.execute("""
                     INSERT INTO pas_listings (
                         id,district,neighborhood,title,price,gross_m2,net_m2,
-                        rooms,listing_date,building_age,total_floors,located_floor,
+                        rooms,listing_date,original_listing_date,building_age,total_floors,located_floor,
                         property_group,location_verified,price_verified,verification_version,
                         source,url,active,
                         first_seen,last_seen,updated_at
                     )
                     VALUES (
-                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                         %s,%s,%s,%s,%s,%s,TRUE,
                         NOW(),NOW(),NOW()
                     )
@@ -942,7 +969,16 @@ def save_listings_to_db(listings):
                         gross_m2=COALESCE(EXCLUDED.gross_m2,pas_listings.gross_m2),
                         net_m2=COALESCE(EXCLUDED.net_m2,pas_listings.net_m2),
                         rooms=CASE WHEN EXCLUDED.rooms<>'' THEN EXCLUDED.rooms ELSE pas_listings.rooms END,
-                        listing_date=CASE WHEN EXCLUDED.listing_date<>'' THEN EXCLUDED.listing_date ELSE pas_listings.listing_date END,
+                        listing_date=CASE
+                            WHEN pas_listings.original_listing_date<>'' THEN pas_listings.original_listing_date
+                            WHEN pas_listings.listing_date<>'' THEN pas_listings.listing_date
+                            ELSE EXCLUDED.listing_date
+                        END,
+                        original_listing_date=CASE
+                            WHEN pas_listings.original_listing_date<>'' THEN pas_listings.original_listing_date
+                            WHEN pas_listings.listing_date<>'' THEN pas_listings.listing_date
+                            ELSE EXCLUDED.original_listing_date
+                        END,
                         building_age=COALESCE(EXCLUDED.building_age,pas_listings.building_age),
                         total_floors=COALESCE(EXCLUDED.total_floors,pas_listings.total_floors),
                         located_floor=CASE WHEN EXCLUDED.located_floor<>'' THEN EXCLUDED.located_floor ELSE pas_listings.located_floor END,
@@ -958,13 +994,23 @@ def save_listings_to_db(listings):
                 """, (
                     str(item.id), item.district, item.neighborhood, item.title or "",
                     item.price, item.gross_m2, item.net_m2, item.rooms or "",
-                    item.listing_date or "", item.building_age,
+                    item.listing_date or "", item.listing_date or "", item.building_age,
                     item.total_floors, item.located_floor or "",
                     item.property_group or "residential",
                     bool(item.location_verified),
                     bool(item.price_verified),
                     int(item.verification_version or 0),
                     item.source or "", url
+                ))
+
+                cur.execute("""
+                    INSERT INTO pas_listing_history (
+                        listing_id, listing_date, price, district, neighborhood, active
+                    )
+                    VALUES (%s,%s,%s,%s,%s,TRUE)
+                """, (
+                    str(item.id), item.listing_date or "", item.price,
+                    item.district, item.neighborhood
                 ))
 
                 if exists:
@@ -1096,15 +1142,15 @@ def save_query_sync(query_key, district, neighborhood, received):
 
 
 def listing_date_is_allowed(listing_date, date_filter):
+    """
+    Takvim günü mantığı:
+      current = yalnız bugün
+      7d      = bugün dahil son 7 takvim günü
+      30d     = bugün dahil son 30 takvim günü
+      90d     = bugün dahil son 90 takvim günü
+    Gelecek tarihli bozuk kayıtlar hiçbir döneme alınmaz.
+    """
     date_filter = str(date_filter or "current").strip()
-    if date_filter == "current":
-        return True
-
-    days_map = {"7d": 7, "30d": 30, "90d": 90}
-    days = days_map.get(date_filter)
-    if not days:
-        return True
-
     text = str(listing_date or "").strip()
     if not text:
         return False
@@ -1114,7 +1160,19 @@ def listing_date_is_allowed(listing_date, date_filter):
     except Exception:
         return False
 
-    return d >= (date.today() - timedelta(days=days))
+    today = date.today()
+    if d > today:
+        return False
+
+    if date_filter == "current":
+        return d == today
+
+    days_map = {"7d": 7, "30d": 30, "90d": 90}
+    days = days_map.get(date_filter)
+    if not days:
+        return True
+
+    return d >= (today - timedelta(days=days - 1))
 
 
 def normalize_floor_text(value):
@@ -1265,12 +1323,11 @@ def load_listings_from_db(filters):
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id,district,neighborhood,title,price,gross_m2,net_m2,
-                       rooms,listing_date,building_age,total_floors,located_floor,
+                       rooms,listing_date,original_listing_date,building_age,total_floors,located_floor,
                        property_group,location_verified,price_verified,
                        verification_version,source,url
                 FROM pas_listings
-                WHERE active=TRUE
-                  AND location_verified=TRUE
+                WHERE location_verified=TRUE
                   AND price_verified=TRUE
                   AND verification_version>=24
                   AND source='sahibinden-real-estate'
@@ -1308,7 +1365,9 @@ def load_listings_from_db(filters):
             gross_m2=gross_m2,
             net_m2=net_m2,
             rooms=r["rooms"] or "",
-            listing_date=normalize_listing_date(r["listing_date"]),
+            listing_date=normalize_listing_date(
+                r["original_listing_date"] or r["listing_date"]
+            ),
             building_age=parse_int(r["building_age"]),
             total_floors=parse_int(r["total_floors"]),
             located_floor=r["located_floor"] or "",
@@ -2256,7 +2315,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 100 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. v4.24 öncesi konum/fiyat doğrulaması olmayan kayıtlar sonuçlardan tamamen gizlenir. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 100 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. v4.24 öncesi konum/fiyat doğrulaması olmayan kayıtlar sonuçlardan tamamen gizlenir. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -3078,6 +3137,8 @@ def api_provider_status():
         max_results=LIVE_NEIGHBORHOOD_MAX_RESULTS,
         enrichment=False,
         normal_search_uses_apify=False,
+        historical_records_preserved=True,
+        immutable_original_listing_date=True,
         neighborhood_direct_url=True,
         repeat_query_guard_hours=SYNC_CACHE_HOURS,
         apify_enrichment=False,
