@@ -36,7 +36,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.44-exact-banner"
+VERSION = "v4.45-stable-app-settings"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -186,7 +186,18 @@ def env_float(name, default):
         return default
 
 
-LIVE_NEIGHBORHOOD_MAX_RESULTS = max(1, min(env_int("PAS_SYNC_MAX_RESULTS", 50), 50))
+ALLOWED_SYNC_RESULTS = (10, 20, 30, 50, 100)
+DEFAULT_SYNC_RESULTS = 50
+ABSOLUTE_SYNC_MAX_RESULTS = 100
+LIVE_NEIGHBORHOOD_MAX_RESULTS = max(
+    1, min(env_int("PAS_SYNC_MAX_RESULTS", DEFAULT_SYNC_RESULTS), ABSOLUTE_SYNC_MAX_RESULTS)
+)
+
+def normalize_sync_max_results(value):
+    parsed = parse_int(value)
+    if parsed in ALLOWED_SYNC_RESULTS:
+        return parsed
+    return DEFAULT_SYNC_RESULTS
 SYNC_CACHE_HOURS = max(
     1, min(env_int("PAS_SYNC_CACHE_HOURS", 6), 72)
 )
@@ -1330,7 +1341,7 @@ def make_query_key(district, neighborhood, filters):
         "total_floors_max": str(filters.get("total_floors_max") or ""),
         "located_floor_filter": str(filters.get("located_floor_filter") or ""),
         "date_filter": str(filters.get("date_filter") or "current"),
-        "hard_max_results": LIVE_NEIGHBORHOOD_MAX_RESULTS,
+        "hard_max_results": normalize_sync_max_results(filters.get("max_results")),
     }
     return json.dumps(relevant, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -1907,7 +1918,7 @@ class NeighborhoodApifyProvider:
 
         limit = max(
             1,
-            min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), 50)
+            min(int(max_results or LIVE_NEIGHBORHOOD_MAX_RESULTS), ABSOLUTE_SYNC_MAX_RESULTS)
         )
 
         actor_input = {
@@ -2898,6 +2909,52 @@ body{background:#f7f8f8!important}
   .exact-banner-img{width:100%;height:auto}
 }
 
+
+/* ===== v4.45 app settings ===== */
+.settings-strip{
+  display:flex;
+  align-items:center;
+  gap:5px;
+  margin:0 4px 4px;
+}
+.settings-toggle{
+  border:1px solid #ccd2da;
+  background:#fff;
+  color:var(--ink);
+  border-radius:8px;
+  padding:6px 9px;
+  font-size:11px;
+  font-weight:800;
+  cursor:pointer;
+}
+.settings-panel{
+  flex:1;
+  display:flex;
+  align-items:center;
+  gap:6px;
+  min-width:0;
+  padding:4px 6px;
+  border:1px solid #dfe5e1;
+  border-radius:8px;
+  background:#f8fbf9;
+}
+.settings-label{font-size:10px;font-weight:800;white-space:nowrap}
+#maxResultsSelect{
+  width:72px;
+  padding:5px 4px!important;
+  font-size:11px!important;
+  font-weight:800;
+}
+.settings-note{font-size:9px;color:var(--muted);white-space:nowrap}
+@media(max-width:600px){
+  .settings-strip{margin:0 2px 3px}
+  .settings-toggle{padding:5px 7px;font-size:10px}
+  .settings-panel{gap:4px;padding:3px 4px}
+  .settings-label{font-size:9px}
+  #maxResultsSelect{width:60px;font-size:10px!important;padding:4px 2px!important}
+  .settings-note{font-size:8px;overflow:hidden;text-overflow:ellipsis}
+}
+
 </style>
 </head>
 <body>
@@ -3007,6 +3064,21 @@ body{background:#f7f8f8!important}
   </details>
 </div>
 
+<div class="settings-strip">
+  <button class="settings-toggle" id="settingsToggle" type="button">⚙️ Ayarlar</button>
+  <div class="settings-panel hidden" id="settingsPanel">
+    <label class="settings-label" for="maxResultsSelect">Maks. sonuç</label>
+    <select id="maxResultsSelect" aria-label="Maksimum canlı arama sonucu">
+      <option value="10">10</option>
+      <option value="20">20</option>
+      <option value="30">30</option>
+      <option value="50" selected>50</option>
+      <option value="100">100</option>
+    </select>
+    <span class="settings-note">Canlı güncelleme maliyet sınırı</span>
+  </div>
+</div>
+
 <div class="actions-sticky actions-with-history">
   <select id="historyDateFilter" name="history_date_filter" aria-label="Kayıtlı ilan dönemi">
     <option value="7d">1 Hafta</option>
@@ -3065,7 +3137,7 @@ body{background:#f7f8f8!important}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 50 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Üstteki İlan Tarihi yalnız Canlı Güncelle sorgusunu belirler. Kayıtlı İlanları Ara'nın solundaki küçük 1 Hafta / 1 Ay / 3 Ay seçimi yalnız PostgreSQL geçmişini belirler ve son seçimi kalıcı olarak hatırlar. Mahalleler tablette satır başına 6, telefonda 4 gösterilir; satırın solundaki kutu o satırın tamamını seçer/kaldırır, tek mahalleler sonradan manuel değiştirilebilir. Bir ilçe seçildiğinde o ilçenin favori mahalleleri otomatik seçilir; kullanıcı daha sonra tek tek çıkarabilir. Bulunduğu Kat kodları: giriş katı=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. v4.39'da ilan detayları açık okunur; a811 hem özet hem detay yapılarında aranır. Eski boş kat alanları aynı ilan ID'si tekrar canlı taramada görüldüğünde doldurulur. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama Ayarlar bölümündeki 10 / 20 / 30 / 50 / 100 seçimine göre sınırlandırılır; 100 seçimi ayrıca onay ister. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Üstteki İlan Tarihi yalnız Canlı Güncelle sorgusunu belirler. Kayıtlı İlanları Ara'nın solundaki küçük 1 Hafta / 1 Ay / 3 Ay seçimi yalnız PostgreSQL geçmişini belirler ve son seçimi kalıcı olarak hatırlar. Mahalleler tablette satır başına 6, telefonda 4 gösterilir; satırın solundaki kutu o satırın tamamını seçer/kaldırır, tek mahalleler sonradan manuel değiştirilebilir. Bir ilçe seçildiğinde o ilçenin favori mahalleleri otomatik seçilir; kullanıcı daha sonra tek tek çıkarabilir. Bulunduğu Kat kodları: giriş katı=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. v4.39'da ilan detayları açık okunur; a811 hem özet hem detay yapılarında aranır. Eski boş kat alanları aynı ilan ID'si tekrar canlı taramada görüldüğünde doldurulur. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -3416,7 +3488,8 @@ function formPayload(){
     net_m2_min:fd.get("net_m2_min")||"",
     net_m2_max:fd.get("net_m2_max")||"",
     gross_m2_min:fd.get("gross_m2_min")||"",
-    gross_m2_max:fd.get("gross_m2_max")||""
+    gross_m2_max:fd.get("gross_m2_max")||"",
+    max_results:document.getElementById("maxResultsSelect")?.value||"50"
   };
 }
 
@@ -3479,6 +3552,14 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
 
 document.getElementById("syncButton").addEventListener("click",async()=>{
   const pairs=getOnePair();
+
+  const activeMaxResults=document.getElementById("maxResultsSelect")?.value||"50";
+  if(activeMaxResults==="100"){
+    const ok100=window.confirm(
+      "Canlı güncelleme 100 maksimum sonuç ile çalışacak. Maliyet artabilir. Devam etmek istediğinize emin misiniz?"
+    );
+    if(!ok100)return;
+  }
 
   if(pairs.length===0){
     showError("Canlı güncelleme için en az 1 mahalle seçin.");
@@ -3658,6 +3739,7 @@ function collectState(){
     favoriteNeighborhoods,
     favoriteFilters:[...favoriteFilters],
     historyDateFilter:document.getElementById("historyDateFilter")?.value||"90d",
+    maxResults:document.getElementById("maxResultsSelect")?.value||"50",
     openDistricts:[...openDistricts],
     filters
   };
@@ -3696,6 +3778,12 @@ function loadState(){
   if(historyEl){
     const hv=saved.historyDateFilter||"90d";
     historyEl.value=["7d","30d","90d"].includes(hv)?hv:"90d";
+  }
+
+  const maxResultsEl=document.getElementById("maxResultsSelect");
+  if(maxResultsEl){
+    const mv=String(saved.maxResults||"50");
+    maxResultsEl.value=["10","20","30","50","100"].includes(mv)?mv:"50";
   }
 
   favoriteFilters=new Set(
@@ -3810,6 +3898,35 @@ document.querySelectorAll('input[name="side"]').forEach(el=>{
 const historyDateFilterEl=document.getElementById("historyDateFilter");
 if(historyDateFilterEl){
   historyDateFilterEl.addEventListener("change",saveState);
+}
+
+const settingsToggle=document.getElementById("settingsToggle");
+const settingsPanel=document.getElementById("settingsPanel");
+if(settingsToggle&&settingsPanel){
+  settingsToggle.addEventListener("click",()=>{
+    settingsPanel.classList.toggle("hidden");
+  });
+}
+
+const maxResultsSelect=document.getElementById("maxResultsSelect");
+if(maxResultsSelect){
+  let previousMaxResults=maxResultsSelect.value||"50";
+  maxResultsSelect.addEventListener("focus",()=>{
+    previousMaxResults=maxResultsSelect.value||"50";
+  });
+  maxResultsSelect.addEventListener("change",()=>{
+    if(maxResultsSelect.value==="100"){
+      const ok=window.confirm(
+        "100 sonuç seçtiniz. Bu seçim canlı güncelleme maliyetini artırabilir. Emin misiniz?"
+      );
+      if(!ok){
+        maxResultsSelect.value=previousMaxResults;
+        return;
+      }
+    }
+    previousMaxResults=maxResultsSelect.value;
+    saveState();
+  });
 }
 
 document.getElementById("pasForm").addEventListener("change",saveState);
@@ -3977,6 +4094,7 @@ def api_sync():
 
         filters = {
             "date_filter": payload.get("date_filter", "current"),
+            "max_results": normalize_sync_max_results(payload.get("max_results")),
             "property_group": payload.get("property_group", "residential_all"),
             "rooms": payload.get("rooms", ""),
             "min_m2": payload.get("min_m2", ""),
@@ -4017,11 +4135,15 @@ def api_sync():
                 message=f"Aynı sorgu son {SYNC_CACHE_HOURS} saat içinde güncellendi; yeni Apify ücreti oluşturulmadı.",
             )
 
+        requested_max_results = normalize_sync_max_results(
+            filters.get("max_results")
+        )
+
         result = APIFY.sync_neighborhood(
             district,
             neighborhood,
             filters=filters,
-            max_results=LIVE_NEIGHBORHOOD_MAX_RESULTS,
+            max_results=requested_max_results,
         )
 
         accepted = result["accepted"]
@@ -4043,8 +4165,8 @@ def api_sync():
 
             message = (
                 f"{district}: {period_label} için en fazla "
-                f"{LIVE_NEIGHBORHOOD_MAX_RESULTS} ilan tarandı; "
-                f"{neighborhood} için uygun ilan ilk {LIVE_NEIGHBORHOOD_MAX_RESULTS} "
+                f"{requested_max_results} ilan tarandı; "
+                f"{neighborhood} için uygun ilan ilk {requested_max_results} "
                 "kayıt içinde bulunamadı. Aynı ilçe bu cache süresinde tekrar ücretli taranmayacak."
             )
             record_sync_state(district, neighborhood, 0, message)
@@ -4056,7 +4178,7 @@ def api_sync():
                 district_verified=len(accepted_all),
                 rejected=result["rejected"],
                 start_url=result["start_url"],
-                hard_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
+                hard_limit=requested_max_results,
                 cached_district=True,
                 **saved_all,
             ), 409
@@ -4084,8 +4206,8 @@ def api_sync():
             rejected=result["rejected"],
             selected_neighborhood_count=selected_count,
             start_url=result["start_url"],
-            sync_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
-            hard_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
+            sync_limit=requested_max_results,
+            hard_limit=requested_max_results,
             cached=False,
             retired_legacy=retired_legacy,
             **saved,
@@ -4145,7 +4267,7 @@ def api_floor_backfill():
             district,
             neighborhood,
             filters=filters,
-            max_results=LIVE_NEIGHBORHOOD_MAX_RESULTS,
+            max_results=DEFAULT_SYNC_RESULTS,
         )
 
         accepted = result["accepted"]
@@ -4164,7 +4286,7 @@ def api_floor_backfill():
             accepted=len(accepted),
             floor_filled=sum(1 for x in accepted if x.located_floor),
             floor_still_missing=before_missing,
-            hard_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
+            hard_limit=requested_max_results,
             **saved,
         )
     except ValueError as exc:
@@ -4204,7 +4326,9 @@ def api_provider_status():
         property_filter_strategy="broad-category-fetch + PAS local classification",
         actor_scope="district",
         neighborhood_filter_supported_by_actor=False,
-        hard_paid_result_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
+        hard_paid_result_limit=ABSOLUTE_SYNC_MAX_RESULTS,
+        default_paid_result_limit=DEFAULT_SYNC_RESULTS,
+        selectable_result_limits=list(ALLOWED_SYNC_RESULTS),
         multi_neighborhood_sync=True,
         multi_neighborhood_confirmation=True,
         detail_fields_enabled=True,
