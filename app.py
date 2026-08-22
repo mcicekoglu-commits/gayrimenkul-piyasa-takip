@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.37-row-select-neighborhoods"
+VERSION = "v4.38-floor-codes-auto-favorites"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -1407,29 +1407,39 @@ def listing_date_is_allowed(listing_date, date_filter):
 
 
 def normalize_floor_text(value):
-    raw = str(value or "").strip()
-    if not raw:
+    # 0 önemli bir değerdir; `value or ""` kullanma.
+    if value is None:
+        return ""
+
+    raw = str(value).strip()
+    if raw == "":
         return ""
 
     s = slug(raw)
 
-    # Önce özel kat ifadeleri: sıra önemli.
-    # "yüksek giriş" içinde "giriş" de geçtiği için önce daha özel ifade kontrol edilir.
-    if any(x in s for x in ("yuksek-giris", "yuksek-zemin")):
+    # Özel ifadelerde en spesifik olan önce kontrol edilir.
+    if any(x in s for x in (
+        "yuksek-giris", "yuksek-giris-kati",
+        "yuksek-zemin", "yuksek-zemin-kat"
+    )):
         return "yk"
 
-    if any(x in s for x in ("cati-kati", "cati", "teras-kati")):
+    if any(x in s for x in (
+        "cati-kati", "cati-kat", "cati",
+        "teras-kati", "teras-kat"
+    )):
         return "çk"
 
     if any(x in s for x in (
-        "dubleks", "duplex", "ters-dubleks", "cati-dubleksi",
-        "bahce-dubleksi", "villa-dubleks"
+        "dubleks", "duplex", "ters-dubleks",
+        "cati-dubleksi", "bahce-dubleksi", "villa-dubleks"
     )):
         return "dx"
 
     if any(x in s for x in (
-        "giris-kati", "giris", "zemin-kat", "zemin",
-        "bahce-kati", "bahce"
+        "giris-kati", "giris-kat", "giris",
+        "zemin-kati", "zemin-kat", "zemin",
+        "bahce-kati", "bahce-kat", "bahce"
     )):
         return "gk"
 
@@ -1439,11 +1449,14 @@ def normalize_floor_text(value):
     if "mustakil" in s:
         return "Müstakil"
 
+    # Sahibinden/A811 sayısal 0 dönerse giriş katıdır.
+    # Önceki sürümde 0 boş stringe dönüşüyordu.
     n = parse_int(raw)
     if n is not None:
+        if n == 0:
+            return "gk"
         return str(n)
 
-    # Kaynak tanımlı ama bizim sözlüğümüzde yoksa "-" yerine ham bilgiyi koru.
     return raw
 
 
@@ -1990,20 +2003,31 @@ class NeighborhoodApifyProvider:
             or self._coded_attribute(item, "a810")
         )
 
-        located_floor = normalize_floor_text(
+        located_floor_raw = (
             self._pick(
-                item, "locatedFloor", "floor", "floorNumber",
-                "floorInfo", "currentFloor"
+                item,
+                "locatedFloorLabel", "floorLabel", "floorName",
+                "locatedFloor", "floorInfo", "currentFloor",
+                "floor", "floorNumber"
             )
             or self._pick(
-                raw, "locatedFloor", "floor", "floorNumber",
-                "floorInfo", "currentFloor"
+                raw,
+                "locatedFloorLabel", "floorLabel", "floorName",
+                "locatedFloor", "floorInfo", "currentFloor",
+                "floor", "floorNumber"
             )
             or self._named_attribute(
-                item, "Bulunduğu Kat", "Bulundugu Kat", "Kat"
+                item,
+                "Bulunduğu Kat", "Bulundugu Kat",
+                "Kat Konumu", "Kat Bilgisi", "Kat"
             )
-            or self._coded_attribute(item, "a811")
         )
+
+        # 0 falsy olduğu için `or` zincirinde kaybolmasın.
+        if located_floor_raw in (None, ""):
+            located_floor_raw = self._coded_attribute(item, "a811")
+
+        located_floor = normalize_floor_text(located_floor_raw)
 
         listed_at = (
             self._pick(item, "listingDate", "listedAt", "createdAt", "date", "dateCreated")
@@ -2722,7 +2746,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 50 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Üstteki İlan Tarihi yalnız Canlı Güncelle sorgusunu belirler. Kayıtlı İlanları Ara'nın solundaki küçük 1 Hafta / 1 Ay / 3 Ay seçimi yalnız PostgreSQL geçmişini belirler ve son seçimi kalıcı olarak hatırlar. Mahalleler tablette satır başına 6, telefonda 4 gösterilir; satırın solundaki kutu o satırın tamamını seçer/kaldırır, tek mahalleler sonradan manuel değiştirilebilir. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 50 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Üstteki İlan Tarihi yalnız Canlı Güncelle sorgusunu belirler. Kayıtlı İlanları Ara'nın solundaki küçük 1 Hafta / 1 Ay / 3 Ay seçimi yalnız PostgreSQL geçmişini belirler ve son seçimi kalıcı olarak hatırlar. Mahalleler tablette satır başına 6, telefonda 4 gösterilir; satırın solundaki kutu o satırın tamamını seçer/kaldırır, tek mahalleler sonradan manuel değiştirilebilir. Bir ilçe seçildiğinde o ilçenin favori mahalleleri otomatik seçilir; kullanıcı daha sonra tek tek çıkarabilir. Bulunduğu Kat kodları: giriş katı=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -2800,6 +2824,19 @@ function toggleFavNeighborhood(d,n){
 function setDistrictSelected(name,checked){
   if(checked){
     selectedDistricts.add(name);
+
+    // v4.38:
+    // İlçe seçildiği anda o ilçedeki favori mahalleleri otomatik seç.
+    // Kullanıcı daha sonra istediğini tek tek çıkarabilir/ekleyebilir.
+    const set=new Set(selectedNeighborhoods[name]||[]);
+    const favs=Array.isArray(favoriteNeighborhoods[name])
+      ? favoriteNeighborhoods[name]
+      : [];
+    for(const n of favs){
+      if((NEIGHBORHOODS[name]||[]).includes(n))set.add(n);
+    }
+    selectedNeighborhoods[name]=[...set];
+
   }else{
     selectedDistricts.delete(name);
     selectedNeighborhoods[name]=[];
@@ -3415,6 +3452,20 @@ function loadState(){
     favoriteNeighborhoods[d.name]=[
       ...mergedFavNeighborhoods[d.name]
     ];
+  }
+
+  // Seçili bir ilçenin daha önce hiç mahalle seçimi kaydı yoksa,
+  // favori mahalleleri başlangıç seçimi olarak getir.
+  // Daha önce manuel seçim yapılmışsa o son hali aynen koru.
+  for(const d of selectedDistricts){
+    const hasSavedNeighborhoodState =
+      Object.prototype.hasOwnProperty.call(selectedNeighborhoods,d);
+
+    if(!hasSavedNeighborhoodState){
+      selectedNeighborhoods[d]=[
+        ...(favoriteNeighborhoods[d]||[])
+      ];
+    }
   }
 
   renderAll();
