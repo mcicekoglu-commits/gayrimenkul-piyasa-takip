@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.33-clean-history-milestone"
+VERSION = "v4.34-floor-codes-multi-sync"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -1413,27 +1413,37 @@ def normalize_floor_text(value):
 
     s = slug(raw)
 
-    aliases = {
-        "bodrum": "Bodrum",
-        "zemin": "Zemin/Giriş",
-        "giris": "Zemin/Giriş",
-        "bahce-kati": "Zemin/Giriş",
-        "bahce": "Zemin/Giriş",
-        "yuksek-giris": "Zemin/Giriş",
-        "cati-kati": "Çatı",
-        "cati": "Çatı",
-        "teras-kati": "Çatı",
-        "mustakil": "Müstakil",
-    }
+    # Önce özel kat ifadeleri: sıra önemli.
+    # "yüksek giriş" içinde "giriş" de geçtiği için önce daha özel ifade kontrol edilir.
+    if any(x in s for x in ("yuksek-giris", "yuksek-zemin")):
+        return "yk"
 
-    for key, label in aliases.items():
-        if key in s:
-            return label
+    if any(x in s for x in ("cati-kati", "cati", "teras-kati")):
+        return "çk"
+
+    if any(x in s for x in (
+        "dubleks", "duplex", "ters-dubleks", "cati-dubleksi",
+        "bahce-dubleksi", "villa-dubleks"
+    )):
+        return "dx"
+
+    if any(x in s for x in (
+        "giris-kati", "giris", "zemin-kat", "zemin",
+        "bahce-kati", "bahce"
+    )):
+        return "gk"
+
+    if "bodrum" in s:
+        return "Bodrum"
+
+    if "mustakil" in s:
+        return "Müstakil"
 
     n = parse_int(raw)
     if n is not None:
         return str(n)
 
+    # Kaynak tanımlı ama bizim sözlüğümüzde yoksa "-" yerine ham bilgiyi koru.
     return raw
 
 
@@ -1449,9 +1459,13 @@ def located_floor_matches(actual_value, wanted):
     if wanted == "basement":
         return actual == "Bodrum"
     if wanted == "ground":
-        return actual == "Zemin/Giriş"
+        return actual == "gk"
+    if wanted == "high_ground":
+        return actual == "yk"
     if wanted == "roof":
-        return actual == "Çatı"
+        return actual == "çk"
+    if wanted == "duplex":
+        return actual == "dx"
     if wanted == "detached":
         return actual == "Müstakil"
 
@@ -2542,12 +2556,14 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
       <select name="located_floor_filter">
         <option value="">Farketmez</option>
         <option value="basement">Bodrum</option>
-        <option value="ground">Zemin / Giriş</option>
+        <option value="ground">Giriş (gk)</option>
+        <option value="high_ground">Yüksek Giriş (yk)</option>
         <option value="1-3">1–3. Kat</option>
         <option value="4-7">4–7. Kat</option>
         <option value="8-12">8–12. Kat</option>
         <option value="13+">13+ Kat</option>
-        <option value="roof">Çatı</option>
+        <option value="roof">Çatı Katı (çk)</option>
+        <option value="duplex">Dubleks (dx)</option>
         <option value="detached">Müstakil</option>
       </select>
     </div>
@@ -2618,7 +2634,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 50 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 50 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -2961,37 +2977,111 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
 
 document.getElementById("syncButton").addEventListener("click",async()=>{
   const pairs=getOnePair();
-  if(pairs.length!==1){
-    showError("Canlı güncelleme için tam olarak 1 ilçe ve o ilçeden 1 mahalle seçin.");
+
+  if(pairs.length===0){
+    showError("Canlı güncelleme için en az 1 mahalle seçin.");
     return;
   }
 
-  const [district,neighborhood]=pairs[0];
-  const button=document.getElementById("syncButton"), oldText=button.textContent;
+  // Yalnız birden fazla mahalle seçildiğinde kullanıcıdan onay iste.
+  if(pairs.length>1){
+    const names=pairs.map(([d,n])=>`${d} / ${n}`).join("\n");
+    const ok=window.confirm(
+      `${pairs.length} mahalle seçtiniz:\n\n${names}\n\n`+
+      `Birden çok mahalleyi güncellemek istediğinize emin misiniz?`
+    );
+    if(!ok)return;
+  }
+
+  const button=document.getElementById("syncButton");
+  const oldText=button.textContent;
   button.disabled=true;
-  button.textContent="Güncelleniyor…";
+
+  let totalRaw=0;
+  let totalAccepted=0;
+  let totalNew=0;
+  let totalUpdated=0;
+  let totalCached=0;
+  let totalFailed=0;
+  const details=[];
 
   try{
     const base=formPayload();
-    const syncPayload={...base,district,neighborhood};
-    const result=await postJson("/api/sync",syncPayload), data=result.data;
-    if(!result.ok||!data.ok)throw new Error(data.error||("Güncelleme başarısız. HTTP "+result.status));
 
+    // Aynı ilçedeki mahalleleri arka arkaya çalıştır.
+    // Backend query cache'i ilçe+filtre bazlı olduğu için aynı ilçe ikinci kez
+    // ücretli taranmaz; kayıtlı ilçe verisinden ilgili mahalle süzülür.
+    for(let i=0;i<pairs.length;i++){
+      const [district,neighborhood]=pairs[i];
+      button.textContent=
+        pairs.length===1
+          ? "Güncelleniyor…"
+          : `Güncelleniyor ${i+1}/${pairs.length}…`;
+
+      try{
+        const syncPayload={...base,district,neighborhood};
+        const result=await postJson("/api/sync",syncPayload);
+        const data=result.data||{};
+
+        if(!result.ok||!data.ok){
+          totalFailed++;
+          details.push(
+            `${neighborhood}: ${data.error||("HTTP "+result.status)}`
+          );
+          continue;
+        }
+
+        totalRaw += Number(data.raw_received||0);
+        totalNew += Number(data.new||0);
+        totalUpdated += Number(data.updated||0);
+
+        if(data.cached){
+          totalCached++;
+          totalAccepted += Number(data.selected_neighborhood_count||0);
+          details.push(
+            `${neighborhood}: kayıt/cache kullanıldı, `+
+            `${Number(data.selected_neighborhood_count||0)} kayıt mevcut`
+          );
+        }else{
+          totalAccepted += Number(data.accepted||0);
+          details.push(
+            `${neighborhood}: ${Number(data.accepted||0)} doğrulanmış ilan`
+          );
+        }
+      }catch(innerErr){
+        totalFailed++;
+        details.push(
+          `${neighborhood}: ${innerErr.message||"Güncelleme hatası"}`
+        );
+      }
+    }
+
+    if(totalFailed===pairs.length){
+      showError(
+        `Seçilen ${pairs.length} mahallenin hiçbiri güncellenemedi.\n`+
+        details.join("\n")
+      );
+      return;
+    }
+
+    const districtCount=new Set(pairs.map(p=>p[0])).size;
     showSuccess(
-      `${district}: en fazla ${data.hard_limit||50} ilan sınırıyla ${data.raw_received} ilan tarandı; `+
-      `${neighborhood} için ${data.accepted} doğrulanmış ilan bulundu. `+
-      `${data.new} yeni, ${data.updated} güncellendi. `+
-      `${data.retired_legacy||0} eski doğrulanmamış kayıt sonuçlardan çıkarıldı.`
+      `${pairs.length} mahalle / ${districtCount} ilçe işlendi. `+
+      `${totalRaw} ücretli ham kayıt tarandı; ${totalAccepted} doğrulanmış mahalle kaydı bulundu. `+
+      `${totalNew} yeni, ${totalUpdated} güncellendi. `+
+      `${totalCached} mahalle mevcut ilçe cache/kaydından karşılandı.`+
+      (totalFailed?`\n${totalFailed} mahallede hata oluştu.`:"")
     );
 
+    // Tüm seçili mahallelerin kayıtlı sonuçlarını birlikte göster.
     document.getElementById("pasForm").requestSubmit();
-  }catch(err){
-    showError(err.message||"Canlı güncelleme hatası.");
+
   }finally{
     button.disabled=false;
     button.textContent=oldText;
   }
 });
+
 
 
 const EXTRA_FILTER_DEFS=[
@@ -3461,6 +3551,8 @@ def api_provider_status():
         actor_scope="district",
         neighborhood_filter_supported_by_actor=False,
         hard_paid_result_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
+        multi_neighborhood_sync=True,
+        multi_neighborhood_confirmation=True,
         district_shared_cache=True,
         max_total_charge_usd=APIFY_MAX_TOTAL_CHARGE_USD,
         strict_location_verification=True,
