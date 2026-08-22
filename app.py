@@ -36,7 +36,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.41-private-pwa"
+VERSION = "v4.42-banner-pwa"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -2697,6 +2697,22 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
   .nb-row .star{font-size:12px!important}
 }
 
+/* ===== v4.42 HALEF top banner ===== */
+.header{
+  width:100%;height:58px;margin:0 0 6px;padding:0 10px;
+  display:flex;align-items:center;gap:8px;
+  background:#0a5b37;border-radius:0 0 10px 10px;overflow:hidden;
+}
+.brand-logo{height:48px;width:auto;max-width:72%;object-fit:contain;object-position:left center;display:block;flex:1 1 auto}
+.header h1{font-size:13px;line-height:1;margin:0;color:#fff;font-weight:850;white-space:nowrap;letter-spacing:0}
+.header .subtitle{font-size:7.5px;line-height:1.15;color:rgba(255,255,255,.86);white-space:normal;max-width:92px}
+@media(max-width:600px){
+  .header{height:54px;padding:0 7px;gap:5px}
+  .brand-logo{height:45px;max-width:70%}
+  .header h1{font-size:11px}
+  .header .subtitle{font-size:6.8px;max-width:78px}
+}
+
 /* ===== v4.41 standalone app mode ===== */
 @media (display-mode: standalone) {
   body { padding-top: max(6px, env(safe-area-inset-top)); }
@@ -3674,7 +3690,7 @@ def manifest_webmanifest():
 
 @app.get("/service-worker.js")
 def service_worker():
-    js = 'const CACHE = "hlf-pas-shell-v1";\nconst SHELL = ["/manifest.webmanifest","/app-icon-192.png","/app-icon-512.png","/apple-touch-icon.png","/halef-logo"];\nself.addEventListener("install", event => { event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL))); self.skipWaiting(); });\nself.addEventListener("activate", event => { event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))); self.clients.claim(); });\nself.addEventListener("fetch", event => {\n  const url = new URL(event.request.url);\n  if (url.pathname.startsWith("/api/")) { event.respondWith(fetch(event.request)); return; }\n  if (event.request.mode === "navigate") { event.respondWith(fetch(event.request)); return; }\n  event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request)));\n});'
+    js = 'const CACHE = "hlf-pas-shell-v2";\nconst SHELL = ["/manifest.webmanifest","/app-icon-192.png","/app-icon-512.png","/apple-touch-icon.png","/halef-logo"];\nself.addEventListener("install", event => { event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL))); self.skipWaiting(); });\nself.addEventListener("activate", event => { event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))); self.clients.claim(); });\nself.addEventListener("fetch", event => {\n  const url = new URL(event.request.url);\n  if (url.pathname.startsWith("/api/")) { event.respondWith(fetch(event.request)); return; }\n  if (event.request.mode === "navigate") { event.respondWith(fetch(event.request)); return; }\n  event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request)));\n});'
     return app.response_class(js, mimetype="application/javascript", headers={"Cache-Control":"no-cache","Service-Worker-Allowed":"/"})
 
 
