@@ -36,7 +36,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.42-banner-pwa"
+VERSION = "v4.43-banner-pwa"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -2697,20 +2697,87 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
   .nb-row .star{font-size:12px!important}
 }
 
-/* ===== v4.42 HALEF top banner ===== */
+/* ===== v4.43 APPROVED HALEF / HLF PAS banner ===== */
 .header{
-  width:100%;height:58px;margin:0 0 6px;padding:0 10px;
-  display:flex;align-items:center;gap:8px;
-  background:#0a5b37;border-radius:0 0 10px 10px;overflow:hidden;
+  width:100%;
+  min-height:78px;
+  margin:0 0 8px;
+  padding:8px 12px;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 1px minmax(160px,23%);
+  align-items:stretch;
+  gap:12px;
+  background:linear-gradient(90deg,#08753f 0%,#075f38 52%,#054d30 100%);
+  border-radius:14px;
+  overflow:hidden;
+  box-shadow:0 3px 10px rgba(0,0,0,.08);
 }
-.brand-logo{height:48px;width:auto;max-width:72%;object-fit:contain;object-position:left center;display:block;flex:1 1 auto}
-.header h1{font-size:13px;line-height:1;margin:0;color:#fff;font-weight:850;white-space:nowrap;letter-spacing:0}
-.header .subtitle{font-size:7.5px;line-height:1.15;color:rgba(255,255,255,.86);white-space:normal;max-width:92px}
+.brand-main{
+  min-width:0;
+  display:flex;
+  align-items:center;
+  overflow:hidden;
+}
+.brand-logo{
+  width:100%;
+  height:62px;
+  object-fit:contain;
+  object-position:left center;
+  display:block;
+  flex:none;
+}
+.header-divider{
+  width:1px;
+  min-height:100%;
+  background:rgba(255,255,255,.78);
+}
+.brand-meta{
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+  align-items:flex-start;
+  color:#fff;
+  padding:0 2px;
+}
+.brand-title{
+  font-size:24px;
+  line-height:1;
+  font-weight:850;
+  letter-spacing:-.3px;
+  white-space:nowrap;
+}
+.brand-rule{
+  width:100%;
+  height:1px;
+  margin:6px 0 5px;
+  background:rgba(255,255,255,.72);
+}
+.brand-subtitle{
+  font-size:13px;
+  line-height:1.15;
+  white-space:nowrap;
+}
+.brand-version{
+  margin-top:6px;
+  font-size:11.5px;
+  line-height:1;
+  white-space:nowrap;
+  opacity:.95;
+}
 @media(max-width:600px){
-  .header{height:54px;padding:0 7px;gap:5px}
-  .brand-logo{height:45px;max-width:70%}
-  .header h1{font-size:11px}
-  .header .subtitle{font-size:6.8px;max-width:78px}
+  .header{
+    min-height:64px;
+    padding:6px 8px;
+    gap:7px;
+    grid-template-columns:minmax(0,1fr) 1px minmax(105px,27%);
+    border-radius:11px;
+  }
+  .brand-logo{height:50px}
+  .brand-title{font-size:16px}
+  .brand-rule{margin:4px 0 4px}
+  .brand-subtitle{font-size:8.8px;white-space:normal}
+  .brand-version{margin-top:4px;font-size:7.7px}
 }
 
 /* ===== v4.41 standalone app mode ===== */
@@ -2724,9 +2791,16 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 <div class="container">
 
 <div class="header">
-  <img class="brand-logo" src="/halef-logo" alt="Halef">
-  <h1>HLF PAS</h1>
-  <div class="subtitle">Piyasa Arama Sistemi · {{ version }}</div>
+  <div class="brand-main">
+    <img class="brand-logo" src="/halef-logo" alt="HALEF">
+  </div>
+  <div class="header-divider" aria-hidden="true"></div>
+  <div class="brand-meta">
+    <div class="brand-title">HLF PAS</div>
+    <div class="brand-rule" aria-hidden="true"></div>
+    <div class="brand-subtitle">Piyasa Arama Sistemi</div>
+    <div class="brand-version">{{ version }}</div>
+  </div>
 </div>
 
 <form id="pasForm">
