@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.34-floor-codes-multi-sync"
+VERSION = "v4.35-default-search-90d"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -2634,7 +2634,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 50 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 50 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Kayıtlı İlanları Ara'da tarih alanına kullanıcı dokunmadıysa varsayılan arama son 90 gündür; kullanıcı Güncel / Son 1 hafta / Son 1 ay / Son 3 ay seçeneklerinden birini özellikle seçerse o seçim uygulanır. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -2895,12 +2895,17 @@ function showSuccess(text){
   document.getElementById("errorBox").classList.add("hidden");
 }
 
-function formPayload(){
+function formPayload(forSearch=false){
   const fd=new FormData(document.getElementById("pasForm"));
+  const visibleDate=fd.get("date_filter")||"current";
+  const effectiveDate=(forSearch && !dateFilterExplicit)
+    ? "90d"
+    : visibleDate;
+
   return {
     districts:[...selectedDistricts],
     neighborhoods:selectedNeighborhoods,
-    date_filter:fd.get("date_filter")||"current",
+    date_filter:effectiveDate,
     property_group:fd.get("property_group")||"residential_all",
     rooms:fd.get("rooms")||"",
     min_m2:fd.get("min_m2")||"",
@@ -2923,7 +2928,7 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
   e.preventDefault();
   if(selectedDistricts.size===0){showError("En az bir ilçe seçin.");return;}
 
-  const payload=formPayload();
+  const payload=formPayload(true);
   const button=document.getElementById("searchButton");
   button.disabled=true;
 
@@ -3095,6 +3100,7 @@ const EXTRA_FILTER_DEFS=[
   ["gross_m2_max","Max Brüt TL/m²","number"]
 ];
 let favoriteFilters=new Set();
+let dateFilterExplicit=false;
 
 function filterBoxHtml(def,isFav){
   const [name,label,type]=def;
@@ -3155,6 +3161,7 @@ function collectState(){
     favoriteDistricts:[...favoriteDistricts],
     favoriteNeighborhoods,
     favoriteFilters:[...favoriteFilters],
+    dateFilterExplicit,
     openDistricts:[...openDistricts],
     filters
   };
@@ -3188,6 +3195,8 @@ function loadState(){
   // Seçimler/filtreler için en güncel bulunan state'i kullan.
   // Liste sırası STATE_KEY, sonra yeni -> eski legacy şeklindedir.
   const saved=states[0].data;
+
+  dateFilterExplicit = saved.dateFilterExplicit === true;
 
   favoriteFilters=new Set(
     (saved.favoriteFilters||[]).filter(
@@ -3284,6 +3293,13 @@ function loadState(){
 document.querySelectorAll('input[name="side"]').forEach(el=>{
   el.addEventListener("change",()=>{renderAll();saveState();});
 });
+const dateFilterEl=document.querySelector('[name="date_filter"]');
+if(dateFilterEl){
+  dateFilterEl.addEventListener("change",()=>{
+    dateFilterExplicit=true;
+    saveState();
+  });
+}
 document.getElementById("pasForm").addEventListener("change",saveState);
 document.getElementById("pasForm").addEventListener("input",saveState);
 
