@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.31-cost-limit-50"
+VERSION = "v4.32-history-recovery"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -875,6 +875,100 @@ def init_db():
                 )
             """)
             cur.execute("""
+                ALTER TABLE pas_listing_history
+                ADD COLUMN IF NOT EXISTS url TEXT NOT NULL DEFAULT ''
+            """)
+            cur.execute("""
+                ALTER TABLE pas_listing_history
+                ADD COLUMN IF NOT EXISTS location_verified BOOLEAN NOT NULL DEFAULT FALSE
+            """)
+            cur.execute("""
+                ALTER TABLE pas_listing_history
+                ADD COLUMN IF NOT EXISTS price_verified BOOLEAN NOT NULL DEFAULT FALSE
+            """)
+            cur.execute("""
+                ALTER TABLE pas_listing_history
+                ADD COLUMN IF NOT EXISTS verification_version INTEGER NOT NULL DEFAULT 0
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS pas_legacy_archive (
+                    listing_id TEXT PRIMARY KEY,
+                    district TEXT NOT NULL DEFAULT '',
+                    neighborhood TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL DEFAULT '',
+                    price BIGINT,
+                    gross_m2 INTEGER,
+                    net_m2 INTEGER,
+                    rooms TEXT NOT NULL DEFAULT '',
+                    listing_date TEXT NOT NULL DEFAULT '',
+                    original_listing_date TEXT NOT NULL DEFAULT '',
+                    building_age INTEGER,
+                    total_floors INTEGER,
+                    located_floor TEXT NOT NULL DEFAULT '',
+                    property_group TEXT NOT NULL DEFAULT 'residential',
+                    source TEXT NOT NULL DEFAULT '',
+                    url TEXT NOT NULL DEFAULT '',
+                    first_seen TIMESTAMPTZ,
+                    last_seen TIMESTAMPTZ,
+                    archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    recovered_at TIMESTAMPTZ
+                )
+            """)
+            cur.execute("""
+                INSERT INTO pas_legacy_archive (
+                    listing_id,district,neighborhood,title,price,gross_m2,net_m2,
+                    rooms,listing_date,original_listing_date,building_age,total_floors,
+                    located_floor,property_group,source,url,first_seen,last_seen
+                )
+                SELECT
+                    id,district,neighborhood,title,price,gross_m2,net_m2,
+                    rooms,listing_date,original_listing_date,building_age,total_floors,
+                    located_floor,property_group,source,url,first_seen,last_seen
+                FROM pas_listings
+                WHERE NOT (location_verified=TRUE AND price_verified=TRUE)
+                ON CONFLICT (listing_id) DO UPDATE SET
+                    district=EXCLUDED.district,
+                    neighborhood=EXCLUDED.neighborhood,
+                    title=EXCLUDED.title,
+                    price=EXCLUDED.price,
+                    gross_m2=EXCLUDED.gross_m2,
+                    net_m2=EXCLUDED.net_m2,
+                    rooms=EXCLUDED.rooms,
+                    listing_date=EXCLUDED.listing_date,
+                    original_listing_date=EXCLUDED.original_listing_date,
+                    building_age=EXCLUDED.building_age,
+                    total_floors=EXCLUDED.total_floors,
+                    located_floor=EXCLUDED.located_floor,
+                    property_group=EXCLUDED.property_group,
+                    source=EXCLUDED.source,
+                    url=EXCLUDED.url,
+                    first_seen=EXCLUDED.first_seen,
+                    last_seen=EXCLUDED.last_seen
+            """)
+            cur.execute("""
+                INSERT INTO pas_listing_history (
+                    listing_id, observed_at, listing_date, price, district, neighborhood,
+                    active, url, location_verified, price_verified, verification_version
+                )
+                SELECT
+                    p.id,
+                    COALESCE(p.first_seen, p.updated_at, NOW()),
+                    COALESCE(NULLIF(p.original_listing_date,''), p.listing_date, ''),
+                    p.price,
+                    p.district,
+                    p.neighborhood,
+                    p.active,
+                    p.url,
+                    p.location_verified,
+                    p.price_verified,
+                    p.verification_version
+                FROM pas_listings p
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM pas_listing_history h
+                    WHERE h.listing_id=p.id
+                )
+            """)
+            cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_pas_listing_history_listing
                 ON pas_listing_history (listing_id, observed_at DESC)
             """)
@@ -1005,13 +1099,24 @@ def save_listings_to_db(listings):
 
                 cur.execute("""
                     INSERT INTO pas_listing_history (
-                        listing_id, listing_date, price, district, neighborhood, active
+                        listing_id, listing_date, price, district, neighborhood, active,
+                        url, location_verified, price_verified, verification_version
                     )
-                    VALUES (%s,%s,%s,%s,%s,TRUE)
+                    VALUES (%s,%s,%s,%s,%s,TRUE,%s,%s,%s,%s)
                 """, (
                     str(item.id), item.listing_date or "", item.price,
-                    item.district, item.neighborhood
+                    item.district, item.neighborhood, url,
+                    bool(item.location_verified), bool(item.price_verified),
+                    int(item.verification_version or 0)
                 ))
+
+                # Aynı ID geçmişte karantinadaysa, strict doğrulama ile geri kazanıldı.
+                if item.location_verified and item.price_verified:
+                    cur.execute("""
+                        UPDATE pas_legacy_archive
+                        SET recovered_at=NOW()
+                        WHERE listing_id=%s
+                    """, (str(item.id),))
 
                 if exists:
                     updated_count += 1
@@ -1329,7 +1434,6 @@ def load_listings_from_db(filters):
                 FROM pas_listings
                 WHERE location_verified=TRUE
                   AND price_verified=TRUE
-                  AND verification_version>=24
                   AND source='sahibinden-real-estate'
                   AND district=ANY(%s)
                 ORDER BY listing_date DESC, updated_at DESC
@@ -1383,6 +1487,77 @@ def load_listings_from_db(filters):
             out.append(item)
 
     return out
+
+
+def load_legacy_archive(filters, limit=300):
+    """
+    Returns historical pre-strict records that still physically exist in PostgreSQL.
+    These are shown only in the archive section and are NEVER included in PAS metrics.
+    Their old neighborhood/price values are preserved for recovery/audit, not trusted.
+    """
+    if not db_configured():
+        return []
+
+    init_db()
+    districts = filters.get("districts") or []
+    selected_nbs = filters.get("neighborhoods") or {}
+
+    if not districts:
+        return []
+
+    requested_pairs = {
+        (slug(d), slug(n))
+        for d in districts
+        for n in (selected_nbs.get(d) or [])
+    }
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT listing_id,district,neighborhood,title,price,gross_m2,net_m2,
+                       rooms,listing_date,original_listing_date,building_age,total_floors,
+                       located_floor,property_group,source,url,first_seen,last_seen,recovered_at
+                FROM pas_legacy_archive
+                WHERE district=ANY(%s)
+                  AND recovered_at IS NULL
+                ORDER BY
+                  COALESCE(NULLIF(original_listing_date,''), listing_date) DESC,
+                  last_seen DESC NULLS LAST
+                LIMIT %s
+            """, (districts, int(limit)))
+            rows = cur.fetchall()
+
+    out = []
+    for r in rows:
+        if requested_pairs and (slug(r["district"]), slug(r["neighborhood"])) not in requested_pairs:
+            continue
+
+        listing_date = normalize_listing_date(
+            r["original_listing_date"] or r["listing_date"]
+        )
+        if not listing_date_is_allowed(listing_date, filters.get("date_filter")):
+            continue
+
+        out.append({
+            "id": str(r["listing_id"]),
+            "district": r["district"] or "",
+            "neighborhood": r["neighborhood"] or "",
+            "title": r["title"] or "Eski kayıt",
+            "price": parse_int(r["price"]),
+            "gross_m2": parse_int(r["gross_m2"]),
+            "net_m2": parse_int(r["net_m2"]),
+            "rooms": r["rooms"] or "",
+            "listing_date": listing_date,
+            "building_age": parse_int(r["building_age"]),
+            "total_floors": parse_int(r["total_floors"]),
+            "located_floor": r["located_floor"] or "",
+            "property_group": r["property_group"] or "",
+            "url": r["url"] or "",
+            "status": "Doğrulama bekliyor",
+        })
+
+    return out
+
 
 
 # =========================================================
@@ -2306,6 +2481,27 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
       <tbody id="listingRows"></tbody>
     </table>
   </div>
+
+  <details id="legacyArchiveDetails" class="hidden" style="margin-top:10px">
+    <summary>Eski kayıt arşivi · <span id="legacyArchiveCount">0</span></summary>
+    <div class="notice" style="margin:0 8px 7px">
+      Bu kayıtlar PostgreSQL'de korunmuş eski kayıtlardır. v4.24 öncesi konum/fiyat
+      doğrulaması bugünkü kadar sıkı olmadığı için Piyasa özetine dahil edilmez.
+      Aynı ilan ID'si yeni strict taramada tekrar doğrulanırsa otomatik olarak normal
+      doğrulanmış kayda geri alınır.
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Mahalle (eski)</th><th>Oda</th><th>Net m²</th>
+            <th>Fiyat (eski)</th><th>İlan Tarihi</th><th>İlan ID</th><th>Durum</th>
+          </tr>
+        </thead>
+        <tbody id="legacyArchiveRows"></tbody>
+      </table>
+    </div>
+  </details>
 </div>
 
 <div class="card info-bottom">
@@ -2315,7 +2511,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 50 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. v4.24 öncesi konum/fiyat doğrulaması olmayan kayıtlar sonuçlardan tamamen gizlenir. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 50 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. v4.24 öncesi kayıtlar silinmez; Eski kayıt arşivinde korunur. Strict doğrulanmış geçmiş kayıtlar sürüm değişse bile ana sonuçlardan kaybolmaz. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -2647,6 +2843,29 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
       tr.onclick=()=>{if(tr.dataset.url)window.location.assign(tr.dataset.url);};
     });
 
+    const legacyDetails=document.getElementById("legacyArchiveDetails");
+    const legacyRows=document.getElementById("legacyArchiveRows");
+    const legacyCount=document.getElementById("legacyArchiveCount");
+    const legacy=data.legacy_archive||[];
+
+    legacyCount.textContent=legacy.length;
+    legacyRows.innerHTML=legacy.map(r=>`
+      <tr class="${r.url?"listing-clickable legacy-clickable":""}" data-url="${esc(r.url||"")}">
+        <td>${esc(r.neighborhood||"-")}</td>
+        <td>${esc(r.rooms||"-")}</td>
+        <td>${r.net_m2==null?"-":r.net_m2}</td>
+        <td>${money(r.price)}</td>
+        <td>${esc(r.listing_date||"-")}</td>
+        <td>${esc(r.id||"-")}</td>
+        <td>${esc(r.status||"Doğrulama bekliyor")}</td>
+      </tr>`).join("");
+
+    legacyDetails.classList.toggle("hidden",legacy.length===0);
+
+    document.querySelectorAll(".legacy-clickable").forEach(tr=>{
+      tr.onclick=()=>{if(tr.dataset.url)window.location.assign(tr.dataset.url);};
+    });
+
     document.getElementById("resultsCard").classList.remove("hidden");
     document.getElementById("errorBox").classList.add("hidden");
   }catch(err){
@@ -2951,6 +3170,7 @@ def api_search():
         filters["neighborhoods"] = neighborhoods
 
         listings = load_listings_from_db(filters)
+        legacy_archive = load_legacy_archive(filters)
         analysis = analyze(listings)
         opportunity = {str(x["id"]): x for x in opportunity_analysis(listings)}
 
@@ -2976,7 +3196,9 @@ def api_search():
             usd_try_rate=usd_try_rate,
             usd_try_source=_usd_try_cache.get("source"),
             analysis=analysis,
-            listings=rows
+            listings=rows,
+            legacy_archive_count=len(legacy_archive),
+            legacy_archive=legacy_archive
         )
 
     except Exception as exc:
@@ -3138,6 +3360,8 @@ def api_provider_status():
         enrichment=False,
         normal_search_uses_apify=False,
         historical_records_preserved=True,
+        legacy_archive_enabled=True,
+        historical_rows_never_hidden_by_version=True,
         immutable_original_listing_date=True,
         neighborhood_direct_url=True,
         repeat_query_guard_hours=SYNC_CACHE_HOURS,
