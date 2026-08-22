@@ -36,7 +36,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.45-stable-app-settings"
+VERSION = "v4.46-dynamic-version-settings-top"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -2955,6 +2955,77 @@ body{background:#f7f8f8!important}
   .settings-note{font-size:8px;overflow:hidden;text-overflow:ellipsis}
 }
 
+
+/* ===== v4.46: dynamic version + settings beside region selector ===== */
+.exact-banner-wrap{position:relative}
+.banner-live-version{
+  position:absolute;
+  right:3.15%;
+  top:72.2%;
+  width:16.8%;
+  height:13%;
+  box-sizing:border-box;
+  display:flex;
+  align-items:center;
+  padding-left:.35%;
+  background:linear-gradient(90deg,#075d38 0%,#064f31 100%);
+  color:#fff;
+  font-size:clamp(7px,1.15vw,16px);
+  font-weight:500;
+  line-height:1;
+  white-space:nowrap;
+  overflow:hidden;
+  z-index:3;
+}
+.topline-actions{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:6px;
+  margin-left:auto;
+  min-width:0;
+}
+.top-settings{
+  position:relative;
+  flex:0 0 auto;
+}
+.top-settings .settings-toggle{
+  min-height:32px;
+  margin:0;
+  padding:5px 8px;
+  white-space:nowrap;
+}
+.top-settings .settings-panel{
+  position:absolute;
+  top:calc(100% + 5px);
+  right:0;
+  z-index:60;
+  min-width:165px;
+  width:max-content;
+  padding:6px;
+  background:#fff;
+  box-shadow:0 8px 24px rgba(0,0,0,.14);
+}
+.top-settings .settings-note{display:none}
+
+@media(max-width:600px){
+  .banner-live-version{
+    right:3.15%;
+    top:72.2%;
+    width:16.8%;
+    font-size:clamp(6px,1.25vw,9px);
+  }
+  .topline-actions{gap:3px}
+  .top-settings .settings-toggle{
+    min-height:29px;
+    padding:4px 5px;
+    font-size:9px;
+  }
+  .top-settings .settings-panel{
+    min-width:140px;
+  }
+}
+
 </style>
 </head>
 <body>
@@ -2962,6 +3033,7 @@ body{background:#f7f8f8!important}
 
 <div class="exact-banner-wrap">
   <img class="exact-banner-img" src="/exact-approved-banner.png" alt="HALEF HLF PAS">
+  <div class="banner-live-version">{{ version }}</div>
 </div>
 
 <form id="pasForm">
@@ -2969,10 +3041,25 @@ body{background:#f7f8f8!important}
 <div class="card">
   <div class="topline">
     <div class="title">📍 Bölge ve İlçe Seçimi</div>
-    <div class="segmented">
-      <label class="seg"><input type="radio" name="side" value="all" checked><span>Tümü</span></label>
-      <label class="seg"><input type="radio" name="side" value="anadolu"><span>Anadolu</span></label>
-      <label class="seg"><input type="radio" name="side" value="avrupa"><span>Avrupa</span></label>
+    <div class="topline-actions">
+      <div class="top-settings">
+        <button class="settings-toggle" id="settingsToggle" type="button">⚙️ Ayarlar</button>
+        <div class="settings-panel hidden" id="settingsPanel">
+          <label class="settings-label" for="maxResultsSelect">Maks. sonuç</label>
+          <select id="maxResultsSelect" aria-label="Maksimum canlı arama sonucu">
+            <option value="10">10</option>
+            <option value="20">20</option>
+            <option value="30">30</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+          </select>
+        </div>
+      </div>
+      <div class="segmented">
+        <label class="seg"><input type="radio" name="side" value="all" checked><span>Tümü</span></label>
+        <label class="seg"><input type="radio" name="side" value="anadolu"><span>Anadolu</span></label>
+        <label class="seg"><input type="radio" name="side" value="avrupa"><span>Avrupa</span></label>
+      </div>
     </div>
   </div>
 
@@ -3062,21 +3149,6 @@ body{background:#f7f8f8!important}
       <div id="otherFilters" class="filter-grid-v428"></div>
     </div>
   </details>
-</div>
-
-<div class="settings-strip">
-  <button class="settings-toggle" id="settingsToggle" type="button">⚙️ Ayarlar</button>
-  <div class="settings-panel hidden" id="settingsPanel">
-    <label class="settings-label" for="maxResultsSelect">Maks. sonuç</label>
-    <select id="maxResultsSelect" aria-label="Maksimum canlı arama sonucu">
-      <option value="10">10</option>
-      <option value="20">20</option>
-      <option value="30">30</option>
-      <option value="50" selected>50</option>
-      <option value="100">100</option>
-    </select>
-    <span class="settings-note">Canlı güncelleme maliyet sınırı</span>
-  </div>
 </div>
 
 <div class="actions-sticky actions-with-history">
