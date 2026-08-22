@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.36-separate-history-filter"
+VERSION = "v4.37-row-select-neighborhoods"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -2473,34 +2473,86 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 }
 
 
-/* ===== v4.36 separate history filter ===== */
-.history-search-bar{
-  display:flex;
-  align-items:center;
-  gap:6px;
-  margin:0 4px 5px;
-  padding:4px 6px;
-  background:#fff;
-  border:1px solid #e2e6eb;
-  border-radius:9px;
-}
-.history-label{
-  font-size:10px;
-  font-weight:700;
-  color:var(--muted);
-  white-space:nowrap;
+
+/* ===== v4.37 compact history + neighborhood row select ===== */
+.actions-with-history{
+  grid-template-columns:72px minmax(0,1.2fr) minmax(0,.8fr)!important;
+  align-items:stretch;
 }
 #historyDateFilter{
-  flex:1;
+  width:100%;
   min-width:0;
-  padding:5px 6px!important;
-  font-size:11px!important;
+  padding:5px 4px!important;
+  font-size:10.5px!important;
+  font-weight:750;
+  border-radius:8px!important;
+  border:1px solid #ccd2da;
+  background:#fff;
+  color:var(--ink);
+}
+
+/* Neighborhoods: 6 per row on tablet/desktop.
+   Row selector lives at far left of the same row. */
+.nb-list{padding:0 4px 5px!important}
+.nb-row{
+  display:grid;
+  grid-template-columns:30px repeat(6,minmax(0,1fr));
+  gap:2px;
+  margin-bottom:2px;
+  align-items:stretch;
+}
+.nb-row:last-child{margin-bottom:0}
+.nb-row-select-wrap{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  border:1px solid #e1e5ea;
+  border-radius:7px;
+  background:#f7f9fb;
+  min-height:27px;
+}
+.nb-row-select{
+  width:18px!important;
+  height:18px!important;
+  margin:0!important;
+  accent-color:#20aa50;
+}
+.nb-row .rowitem{
+  gap:1px!important;
+  padding:2px 3px!important;
+  min-height:27px!important;
   border-radius:7px!important;
 }
+.nb-row .rowitem input{
+  width:13px!important;
+  height:13px!important;
+}
+.nb-row .rowname{
+  font-size:10.2px!important;
+  line-height:1!important;
+}
+.nb-row .star{
+  font-size:13px!important;
+}
+
+/* iPhone: 4 neighborhoods per row + left row selector. */
 @media(max-width:600px){
-  .history-search-bar{padding:3px 5px;margin-bottom:4px}
-  .history-label{font-size:9px}
-  #historyDateFilter{padding:4px 5px!important;font-size:10.5px!important}
+  .actions-with-history{
+    grid-template-columns:64px minmax(0,1.15fr) minmax(0,.85fr)!important;
+  }
+  #historyDateFilter{
+    font-size:9.8px!important;
+    padding:4px 2px!important;
+  }
+  .nb-row{
+    grid-template-columns:28px repeat(4,minmax(0,1fr));
+    gap:1px;
+  }
+  .nb-row-select-wrap{min-height:26px}
+  .nb-row-select{width:17px!important;height:17px!important}
+  .nb-row .rowitem{padding:2px!important;min-height:26px!important}
+  .nb-row .rowname{font-size:9.4px!important}
+  .nb-row .star{font-size:12px!important}
 }
 
 </style>
@@ -2612,16 +2664,12 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
   </details>
 </div>
 
-<div class="history-search-bar">
-  <label class="history-label">Kayıtlı ilan dönemi</label>
-  <select id="historyDateFilter" name="history_date_filter">
-    <option value="7d">Son 1 hafta</option>
-    <option value="30d">Son 1 ay</option>
-    <option value="90d" selected>Son 3 ay</option>
+<div class="actions-sticky actions-with-history">
+  <select id="historyDateFilter" name="history_date_filter" aria-label="Kayıtlı ilan dönemi">
+    <option value="7d">1 Hafta</option>
+    <option value="30d">1 Ay</option>
+    <option value="90d" selected>3 Ay</option>
   </select>
-</div>
-
-<div class="actions-sticky">
   <button class="primary" id="searchButton" type="submit">Kayıtlı İlanları Ara</button>
   <button class="secondary" id="syncButton" type="button">Canlı Güncelle</button>
 </div>
@@ -2674,7 +2722,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 50 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Üstteki İlan Tarihi yalnız Canlı Güncelle sorgusunu belirler. Kayıtlı İlanları Ara üzerindeki ayrı dönem seçimi yalnız PostgreSQL geçmişini belirler ve Son 1 hafta / Son 1 ay / Son 3 ay arasındaki son seçimi kalıcı olarak hatırlar. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 50 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Üstteki İlan Tarihi yalnız Canlı Güncelle sorgusunu belirler. Kayıtlı İlanları Ara'nın solundaki küçük 1 Hafta / 1 Ay / 3 Ay seçimi yalnız PostgreSQL geçmişini belirler ve son seçimi kalıcı olarak hatırlar. Mahalleler tablette satır başına 6, telefonda 4 gösterilir; satırın solundaki kutu o satırın tamamını seçer/kaldırır, tek mahalleler sonradan manuel değiştirilebilir. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -2767,6 +2815,45 @@ function setNeighborhoodSelected(d,n,checked){
   if(checked)selectedDistricts.add(d);
   renderAll();
   saveState();
+}
+
+function neighborhoodRowSize(){
+  return window.matchMedia("(max-width:600px)").matches ? 4 : 6;
+}
+
+function setNeighborhoodRowSelected(d,names,checked){
+  const set=new Set(selectedNeighborhoods[d]||[]);
+  for(const n of names){
+    if(checked)set.add(n);
+    else set.delete(n);
+  }
+  selectedNeighborhoods[d]=[...set];
+  if(checked && names.length)selectedDistricts.add(d);
+  renderAll();
+  saveState();
+}
+
+function neighborhoodRowControlHtml(d,names){
+  const selectedSet=new Set(selectedNeighborhoods[d]||[]);
+  const selectedCount=names.filter(n=>selectedSet.has(n)).length;
+  const allSelected=names.length>0 && selectedCount===names.length;
+  const someSelected=selectedCount>0 && !allSelected;
+  const jd=JSON.stringify(d);
+  const jnames=JSON.stringify(names);
+
+  return `<div class="nb-row-select-wrap"
+      title="${allSelected?"Satırın tamamını kaldır":"Satırın tamamını seç"}">
+    <input class="nb-row-select" type="checkbox"
+      ${allSelected?"checked":""}
+      data-indeterminate="${someSelected?"1":"0"}"
+      onchange='setNeighborhoodRowSelected(${jd},${jnames},this.checked)'>
+  </div>`;
+}
+
+function applyNeighborhoodRowIndeterminate(){
+  document.querySelectorAll(".nb-row-select").forEach(el=>{
+    el.indeterminate=el.dataset.indeterminate==="1";
+  });
 }
 function toggleDistrictOpen(d){
   if(openDistricts.has(d))openDistricts.delete(d);else openDistricts.add(d);
@@ -2874,20 +2961,33 @@ function renderNeighborhoodArea(){
     return;
   }
 
+  const rowSize=neighborhoodRowSize();
+
   area.innerHTML=active.map(d=>{
     const isOpen=openDistricts.has(d);
     const selectedCount=(selectedNeighborhoods[d]||[]).length;
+    const names=NEIGHBORHOODS[d]||[];
+    const rows=[];
+
+    for(let i=0;i<names.length;i+=rowSize){
+      const group=names.slice(i,i+rowSize);
+      rows.push(`<div class="nb-row">
+        ${neighborhoodRowControlHtml(d,group)}
+        ${group.map(n=>neighborhoodRowHtml(d,n)).join("")}
+      </div>`);
+    }
+
     return `<details ${isOpen?"open":""} data-d="${esc(d)}">
       <summary onclick='event.preventDefault();toggleDistrictOpen(${JSON.stringify(d)})'>
         ${esc(d)} mahalleleri${selectedCount?` · ${selectedCount} seçili`:""}
       </summary>
       <div class="nb-list">
-        <div class="nb-grid">
-          ${(NEIGHBORHOODS[d]||[]).map(n=>neighborhoodRowHtml(d,n)).join("")}
-        </div>
+        ${rows.join("")}
       </div>
     </details>`;
   }).join("");
+
+  applyNeighborhoodRowIndeterminate();
 }
 
 function renderAll(){
@@ -3339,6 +3439,13 @@ if(historyDateFilterEl){
 
 document.getElementById("pasForm").addEventListener("change",saveState);
 document.getElementById("pasForm").addEventListener("input",saveState);
+
+const neighborhoodLayoutMedia=window.matchMedia("(max-width:600px)");
+if(neighborhoodLayoutMedia.addEventListener){
+  neighborhoodLayoutMedia.addEventListener("change",()=>renderNeighborhoodArea());
+}else if(neighborhoodLayoutMedia.addListener){
+  neighborhoodLayoutMedia.addListener(()=>renderNeighborhoodArea());
+}
 
 loadState();
 </script>
