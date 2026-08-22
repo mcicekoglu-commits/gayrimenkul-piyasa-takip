@@ -35,7 +35,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.35-default-search-90d"
+VERSION = "v4.36-separate-history-filter"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -2472,6 +2472,37 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
   .filter-box input,.filter-box select{padding:4px 3px!important;font-size:10.5px!important}
 }
 
+
+/* ===== v4.36 separate history filter ===== */
+.history-search-bar{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  margin:0 4px 5px;
+  padding:4px 6px;
+  background:#fff;
+  border:1px solid #e2e6eb;
+  border-radius:9px;
+}
+.history-label{
+  font-size:10px;
+  font-weight:700;
+  color:var(--muted);
+  white-space:nowrap;
+}
+#historyDateFilter{
+  flex:1;
+  min-width:0;
+  padding:5px 6px!important;
+  font-size:11px!important;
+  border-radius:7px!important;
+}
+@media(max-width:600px){
+  .history-search-bar{padding:3px 5px;margin-bottom:4px}
+  .history-label{font-size:9px}
+  #historyDateFilter{padding:4px 5px!important;font-size:10.5px!important}
+}
+
 </style>
 </head>
 <body>
@@ -2581,6 +2612,15 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
   </details>
 </div>
 
+<div class="history-search-bar">
+  <label class="history-label">Kayıtlı ilan dönemi</label>
+  <select id="historyDateFilter" name="history_date_filter">
+    <option value="7d">Son 1 hafta</option>
+    <option value="30d">Son 1 ay</option>
+    <option value="90d" selected>Son 3 ay</option>
+  </select>
+</div>
+
 <div class="actions-sticky">
   <button class="primary" id="searchButton" type="submit">Kayıtlı İlanları Ara</button>
   <button class="secondary" id="syncButton" type="button">Canlı Güncelle</button>
@@ -2634,7 +2674,7 @@ input[type=number],select{padding:7px;font-size:13px;border-radius:8px}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 50 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Kayıtlı İlanları Ara'da tarih alanına kullanıcı dokunmadıysa varsayılan arama son 90 gündür; kullanıcı Güncel / Son 1 hafta / Son 1 ay / Son 3 ay seçeneklerinden birini özellikle seçerse o seçim uygulanır. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama kesin olarak en fazla 50 ilanla sınırlandırılır. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Üstteki İlan Tarihi yalnız Canlı Güncelle sorgusunu belirler. Kayıtlı İlanları Ara üzerindeki ayrı dönem seçimi yalnız PostgreSQL geçmişini belirler ve Son 1 hafta / Son 1 ay / Son 3 ay arasındaki son seçimi kalıcı olarak hatırlar. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -2895,17 +2935,12 @@ function showSuccess(text){
   document.getElementById("errorBox").classList.add("hidden");
 }
 
-function formPayload(forSearch=false){
+function formPayload(){
   const fd=new FormData(document.getElementById("pasForm"));
-  const visibleDate=fd.get("date_filter")||"current";
-  const effectiveDate=(forSearch && !dateFilterExplicit)
-    ? "90d"
-    : visibleDate;
-
   return {
     districts:[...selectedDistricts],
     neighborhoods:selectedNeighborhoods,
-    date_filter:effectiveDate,
+    date_filter:fd.get("date_filter")||"current",
     property_group:fd.get("property_group")||"residential_all",
     rooms:fd.get("rooms")||"",
     min_m2:fd.get("min_m2")||"",
@@ -2928,7 +2963,8 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
   e.preventDefault();
   if(selectedDistricts.size===0){showError("En az bir ilçe seçin.");return;}
 
-  const payload=formPayload(true);
+  const payload=formPayload();
+  payload.date_filter=document.getElementById("historyDateFilter")?.value||"90d";
   const button=document.getElementById("searchButton");
   button.disabled=true;
 
@@ -3100,7 +3136,6 @@ const EXTRA_FILTER_DEFS=[
   ["gross_m2_max","Max Brüt TL/m²","number"]
 ];
 let favoriteFilters=new Set();
-let dateFilterExplicit=false;
 
 function filterBoxHtml(def,isFav){
   const [name,label,type]=def;
@@ -3161,7 +3196,7 @@ function collectState(){
     favoriteDistricts:[...favoriteDistricts],
     favoriteNeighborhoods,
     favoriteFilters:[...favoriteFilters],
-    dateFilterExplicit,
+    historyDateFilter:document.getElementById("historyDateFilter")?.value||"90d",
     openDistricts:[...openDistricts],
     filters
   };
@@ -3196,7 +3231,11 @@ function loadState(){
   // Liste sırası STATE_KEY, sonra yeni -> eski legacy şeklindedir.
   const saved=states[0].data;
 
-  dateFilterExplicit = saved.dateFilterExplicit === true;
+  const historyEl=document.getElementById("historyDateFilter");
+  if(historyEl){
+    const hv=saved.historyDateFilter||"90d";
+    historyEl.value=["7d","30d","90d"].includes(hv)?hv:"90d";
+  }
 
   favoriteFilters=new Set(
     (saved.favoriteFilters||[]).filter(
@@ -3293,13 +3332,11 @@ function loadState(){
 document.querySelectorAll('input[name="side"]').forEach(el=>{
   el.addEventListener("change",()=>{renderAll();saveState();});
 });
-const dateFilterEl=document.querySelector('[name="date_filter"]');
-if(dateFilterEl){
-  dateFilterEl.addEventListener("change",()=>{
-    dateFilterExplicit=true;
-    saveState();
-  });
+const historyDateFilterEl=document.getElementById("historyDateFilter");
+if(historyDateFilterEl){
+  historyDateFilterEl.addEventListener("change",saveState);
 }
+
 document.getElementById("pasForm").addEventListener("change",saveState);
 document.getElementById("pasForm").addEventListener("input",saveState);
 
