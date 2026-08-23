@@ -36,7 +36,8 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.46-dynamic-version-settings-top"
+VERSION = "v4.47-clean-version-max-display"
+BANNER_VERSION = "v4.47"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -3026,6 +3027,46 @@ body{background:#f7f8f8!important}
   }
 }
 
+
+/* ===== v4.47 clean banner version + live Max button ===== */
+.banner-live-version{
+  right:2.75%!important;
+  top:70.4%!important;
+  width:17.9%!important;
+  height:16.2%!important;
+  padding:0!important;
+  display:flex!important;
+  align-items:center!important;
+  justify-content:flex-start!important;
+  padding-left:.75%!important;
+  background:#064f31!important;
+  color:#fff!important;
+  font-size:clamp(8px,1.08vw,15px)!important;
+  font-weight:500!important;
+  line-height:1!important;
+  letter-spacing:0!important;
+  white-space:nowrap!important;
+  overflow:hidden!important;
+}
+.top-settings .settings-toggle{
+  min-width:62px;
+  text-align:center;
+}
+@media(max-width:600px){
+  .banner-live-version{
+    right:2.75%!important;
+    top:70.4%!important;
+    width:17.9%!important;
+    height:16.2%!important;
+    padding-left:.75%!important;
+    font-size:clamp(6px,1.15vw,8px)!important;
+  }
+  .top-settings .settings-toggle{
+    min-width:54px;
+    font-size:9px!important;
+  }
+}
+
 </style>
 </head>
 <body>
@@ -3033,7 +3074,7 @@ body{background:#f7f8f8!important}
 
 <div class="exact-banner-wrap">
   <img class="exact-banner-img" src="/exact-approved-banner.png" alt="HALEF HLF PAS">
-  <div class="banner-live-version">{{ version }}</div>
+  <div class="banner-live-version">{{ banner_version }}</div>
 </div>
 
 <form id="pasForm">
@@ -3043,7 +3084,7 @@ body{background:#f7f8f8!important}
     <div class="title">📍 Bölge ve İlçe Seçimi</div>
     <div class="topline-actions">
       <div class="top-settings">
-        <button class="settings-toggle" id="settingsToggle" type="button">⚙️ Ayarlar</button>
+        <button class="settings-toggle" id="settingsToggle" type="button">Max 50</button>
         <div class="settings-panel hidden" id="settingsPanel">
           <label class="settings-label" for="maxResultsSelect">Maks. sonuç</label>
           <select id="maxResultsSelect" aria-label="Maksimum canlı arama sonucu">
@@ -3856,6 +3897,7 @@ function loadState(){
   if(maxResultsEl){
     const mv=String(saved.maxResults||"50");
     maxResultsEl.value=["10","20","30","50","100"].includes(mv)?mv:"50";
+    refreshMaxButton();
   }
 
   favoriteFilters=new Set(
@@ -3974,6 +4016,14 @@ if(historyDateFilterEl){
 
 const settingsToggle=document.getElementById("settingsToggle");
 const settingsPanel=document.getElementById("settingsPanel");
+
+function refreshMaxButton(){
+  const sel=document.getElementById("maxResultsSelect");
+  if(settingsToggle&&sel){
+    settingsToggle.textContent=`Max ${sel.value||"50"}`;
+  }
+}
+
 if(settingsToggle&&settingsPanel){
   settingsToggle.addEventListener("click",()=>{
     settingsPanel.classList.toggle("hidden");
@@ -3993,10 +4043,12 @@ if(maxResultsSelect){
       );
       if(!ok){
         maxResultsSelect.value=previousMaxResults;
+        refreshMaxButton();
         return;
       }
     }
     previousMaxResults=maxResultsSelect.value;
+    refreshMaxButton();
     saveState();
   });
 }
@@ -4012,6 +4064,7 @@ if(neighborhoodLayoutMedia.addEventListener){
 }
 
 loadState();
+refreshMaxButton();
 </script>
 </body>
 </html>
@@ -4082,6 +4135,7 @@ def home():
         districts_json=json.dumps(DISTRICTS, ensure_ascii=False),
         neighborhoods_json=json.dumps(NEIGHBORHOODS, ensure_ascii=False),
         version=VERSION,
+        banner_version=BANNER_VERSION,
         live_limit=LIVE_NEIGHBORHOOD_MAX_RESULTS,
         cache_hours=SYNC_CACHE_HOURS,
     )
