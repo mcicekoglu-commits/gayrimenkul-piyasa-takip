@@ -36,7 +36,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.47-favorites-compact"
+VERSION = "v4.47-neighborhoods-complete-responsive-grid"
 BANNER_VERSION = "v4.47"
 
 DISTRICTS = [
@@ -3169,6 +3169,48 @@ body{background:#f7f8f8!important}
   }
 }
 
+
+/* ===== v4.47 FIX: complete neighborhoods + responsive columns ===== */
+
+/* İlçe ve mahalle kartları: tablet 4 sütun */
+#districts.grid{
+  display:grid!important;
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:5px!important;
+}
+#neighborhoodArea .nb-row{
+  display:grid!important;
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:5px!important;
+  align-items:stretch!important;
+}
+
+/* Satır toplu seçim kontrolü varsa ilk hücre olarak aynı grid içinde kalsın. */
+#neighborhoodArea .nb-row > *{
+  min-width:0!important;
+}
+
+/* Telefon: 3 sütun */
+@media(max-width:600px){
+  #districts.grid{
+    grid-template-columns:repeat(3,minmax(0,1fr))!important;
+    gap:4px!important;
+  }
+  #neighborhoodArea .nb-row{
+    grid-template-columns:repeat(3,minmax(0,1fr))!important;
+    gap:4px!important;
+  }
+}
+
+/* Tablet ve geniş ekranlarda kutuların gereksiz büyümesini engelle. */
+@media(min-width:601px){
+  #districts.grid .choice,
+  #neighborhoodArea .choice{
+    width:100%!important;
+    box-sizing:border-box!important;
+  }
+}
+
 </style>
 </head>
 <body>
@@ -3623,8 +3665,7 @@ function renderNeighborhoodArea(){
   const sections=[];
 
   for(const d of active){
-    const favSet=new Set(favoriteNeighborhoods[d]||[]);
-    const names=(NEIGHBORHOODS[d]||[]).filter(n=>!favSet.has(n));
+    const names=(NEIGHBORHOODS[d]||[]);
     if(!names.length)continue;
 
     const rows=[];
