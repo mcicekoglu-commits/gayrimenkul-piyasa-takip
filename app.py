@@ -36,7 +36,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.47-neighborhoods-complete-responsive-grid"
+VERSION = "v4.47-neighborhood-layout-fixed"
 BANNER_VERSION = "v4.47"
 
 DISTRICTS = [
@@ -3211,6 +3211,42 @@ body{background:#f7f8f8!important}
   }
 }
 
+
+/* ===== v4.47 neighborhood visual alignment fix ===== */
+#neighborhoodArea .nb-list{
+  display:block!important;
+}
+#neighborhoodArea .nb-row{
+  display:grid!important;
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:6px!important;
+  margin-bottom:6px!important;
+  width:100%!important;
+}
+#neighborhoodArea .nb-row .choice{
+  width:100%!important;
+  min-width:0!important;
+  margin:0!important;
+  box-sizing:border-box!important;
+}
+#neighborhoodArea .nb-row .choice label,
+#neighborhoodArea .nb-row label.choice{
+  width:100%!important;
+  min-width:0!important;
+  box-sizing:border-box!important;
+}
+#neighborhoodArea .nb-district-name{
+  padding:2px 2px 6px!important;
+  margin:0!important;
+}
+@media(max-width:600px){
+  #neighborhoodArea .nb-row{
+    grid-template-columns:repeat(3,minmax(0,1fr))!important;
+    gap:5px!important;
+    margin-bottom:5px!important;
+  }
+}
+
 </style>
 </head>
 <body>
@@ -3672,7 +3708,6 @@ function renderNeighborhoodArea(){
     for(let i=0;i<names.length;i+=rowSize){
       const group=names.slice(i,i+rowSize);
       rows.push(`<div class="nb-row">
-        ${neighborhoodRowControlHtml(d,group)}
         ${group.map(n=>neighborhoodRowHtml(d,n)).join("")}
       </div>`);
     }
@@ -3684,7 +3719,6 @@ function renderNeighborhoodArea(){
   }
 
   area.innerHTML=sections.join("");
-  applyNeighborhoodRowIndeterminate();
 }
 function renderAll(){
   renderDistricts();
