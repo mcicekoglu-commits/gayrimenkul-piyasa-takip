@@ -36,8 +36,8 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.48-favorites-green-blue-grid"
-BANNER_VERSION = "v4.48"
+VERSION = "v4.49-locked-blue-neighborhood-grid"
+BANNER_VERSION = "v4.49"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -3381,6 +3381,123 @@ body{background:#f7f8f8!important}
   }
 }
 
+
+/* =========================================================
+   v4.49 FINAL / LOCKED
+   Onaylanan görünüm:
+   - iPad/tablet 4 sütun
+   - iPhone 3 sütun
+   - ilçe kartları soft yeşil
+   - favori mahalle + mahalle kartları soft mavi
+   - seçili mahalleler YEŞİL DEĞİL, MAVİ
+   - mahalleler kesintisiz grid: boş/düzensiz kolon yok
+   ========================================================= */
+
+#favoriteDistricts{
+  display:grid!important;
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:8px!important;
+  background:transparent!important;
+  border:0!important;
+  padding:0!important;
+}
+#favoriteDistricts .chip,
+#districts .rowitem{
+  background:#f3faf5!important;
+  border:1px solid #b8ddc2!important;
+}
+#favoriteDistricts .chip:has(input:checked),
+#districts .rowitem:has(input:checked){
+  background:#eaf7ee!important;
+  border-color:#73c48a!important;
+}
+#favoriteDistricts input:checked,
+#districts input:checked{
+  accent-color:#20aa50!important;
+}
+
+/* İlçe / mahalle favorileri ayırıcı çizgisi */
+#favoriteNeighborhoods{
+  display:grid!important;
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:8px!important;
+  margin-top:12px!important;
+  padding:14px 0 0!important;
+  border:0!important;
+  border-top:1px solid #d8dde3!important;
+  border-radius:0!important;
+  background:transparent!important;
+}
+
+/* Favori mahallelerin tamamı mavi aile */
+#favoriteNeighborhoods .chip{
+  background:#eef6ff!important;
+  border:1px solid #b9d6f7!important;
+}
+#favoriteNeighborhoods .chip:has(input:checked){
+  background:#e5f1ff!important;
+  border-color:#78afe9!important;
+}
+#favoriteNeighborhoods input:checked{
+  accent-color:#1268c4!important;
+}
+
+/* Mahalle alanının tamamı soft mavi */
+#neighborhoodArea{
+  background:#f4f8ff!important;
+  padding:8px 10px 12px!important;
+}
+#neighborhoodArea .nb-district-group{
+  width:100%!important;
+}
+#neighborhoodArea .nb-list{
+  display:grid!important;
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:8px 12px!important;
+  width:100%!important;
+}
+#neighborhoodArea .rowitem{
+  width:100%!important;
+  min-width:0!important;
+  min-height:42px!important;
+  margin:0!important;
+  box-sizing:border-box!important;
+  background:#f3f8ff!important;
+  border:1px solid #c4daf3!important;
+}
+#neighborhoodArea .rowitem:has(input:checked){
+  background:#e5f1ff!important;
+  border-color:#78afe9!important;
+}
+#neighborhoodArea .rowitem:has(input:checked) input{
+  accent-color:#1268c4!important;
+}
+#neighborhoodArea .rowitem:has(input:checked) .star.on,
+#favoriteNeighborhoods .chip .star.on{
+  color:#f4b400!important;
+}
+
+/* Eski nb-row kuralları artık yerleşimi bozamaz */
+#neighborhoodArea .nb-row{
+  display:contents!important;
+}
+
+/* iPhone = 3 sütun */
+@media(max-width:600px){
+  #favoriteDistricts,
+  #favoriteNeighborhoods,
+  #neighborhoodArea .nb-list{
+    grid-template-columns:repeat(3,minmax(0,1fr))!important;
+    gap:5px!important;
+  }
+  #neighborhoodArea{
+    padding:6px!important;
+  }
+  #neighborhoodArea .rowitem{
+    min-height:38px!important;
+  }
+}
+
 </style>
 </head>
 <body>
@@ -3838,17 +3955,11 @@ function renderNeighborhoodArea(){
     const names=(NEIGHBORHOODS[d]||[]);
     if(!names.length)continue;
 
-    const rows=[];
-    for(let i=0;i<names.length;i+=rowSize){
-      const group=names.slice(i,i+rowSize);
-      rows.push(`<div class="nb-row">
-        ${group.map(n=>neighborhoodRowHtml(d,n)).join("")}
-      </div>`);
-    }
-
     sections.push(`<div class="nb-district-group">
       <div class="nb-district-name">${esc(d)}</div>
-      <div class="nb-list">${rows.join("")}</div>
+      <div class="nb-list">
+        ${names.map(n=>neighborhoodRowHtml(d,n)).join("")}
+      </div>
     </div>`);
   }
 
