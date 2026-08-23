@@ -36,8 +36,8 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.47-neighborhood-layout-fixed"
-BANNER_VERSION = "v4.47"
+VERSION = "v4.48-favorites-green-blue-grid"
+BANNER_VERSION = "v4.48"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -3244,6 +3244,140 @@ body{background:#f7f8f8!important}
     grid-template-columns:repeat(3,minmax(0,1fr))!important;
     gap:5px!important;
     margin-bottom:5px!important;
+  }
+}
+
+
+/* =========================================================
+   v4.48 LOCKED UI
+   İlçeler: soft yeşil
+   Mahalleler: soft mavi
+   Tablet/iPad: 4 sütun
+   iPhone: 3 sütun
+   ========================================================= */
+
+/* ---- Favori ilçeler ---- */
+#favoriteDistricts{
+  display:grid!important;
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:6px!important;
+  background:#f4fbf6!important;
+  border:1px solid #d8eee0!important;
+  padding:6px!important;
+  border-radius:11px!important;
+  margin-bottom:0!important;
+}
+#favoriteDistricts .choice{
+  background:#f1faf4!important;
+  border-color:#a9d9b8!important;
+}
+
+/* ---- İlçeler ile mahalle favorileri arasında çizgi ---- */
+#favoriteNeighborhoods{
+  position:relative!important;
+  margin-top:12px!important;
+  padding-top:14px!important;
+}
+#favoriteNeighborhoods::before{
+  content:"";
+  position:absolute;
+  left:0;
+  right:0;
+  top:0;
+  height:1px;
+  background:#cfd6dc;
+}
+
+/* ---- Favori mahalleler: soft mavi ---- */
+#favoriteNeighborhoods{
+  display:grid!important;
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:6px!important;
+  background:#f3f8ff!important;
+  border:1px solid #d8e7fb!important;
+  padding-left:6px!important;
+  padding-right:6px!important;
+  padding-bottom:6px!important;
+  border-radius:11px!important;
+}
+#favoriteNeighborhoods .choice{
+  background:#eef6ff!important;
+  border-color:#b7d3f4!important;
+}
+
+/* ---- Açılır ilçe listesi: soft yeşil ---- */
+#districts.grid{
+  display:grid!important;
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:6px!important;
+}
+#districts.grid .choice{
+  background:#f1faf4!important;
+  border-color:#b5dcc0!important;
+}
+
+/* ---- Açılır mahalle listesi: soft mavi ---- */
+#neighborhoodDetails{
+  background:#f7fbff!important;
+}
+#neighborhoodArea{
+  background:#f3f8ff!important;
+  border-radius:10px!important;
+  padding:7px!important;
+}
+#neighborhoodArea .nb-row{
+  display:grid!important;
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:6px!important;
+  margin-bottom:6px!important;
+  width:100%!important;
+}
+#neighborhoodArea .nb-row .choice{
+  width:100%!important;
+  min-width:0!important;
+  margin:0!important;
+  box-sizing:border-box!important;
+  background:#eef6ff!important;
+  border-color:#b7d3f4!important;
+}
+
+/* seçili mahalle de mavi aile içinde kalsın */
+#favoriteNeighborhoods .choice.selected,
+#neighborhoodArea .choice.selected{
+  background:#e7f2ff!important;
+  border-color:#7fb2eb!important;
+}
+
+/* İlçe seçili kartları soft yeşil kalsın */
+#favoriteDistricts .choice.selected,
+#districts.grid .choice.selected{
+  background:#eaf8ee!important;
+  border-color:#73c48a!important;
+}
+
+/* Tablet/iPad: 4 sütun */
+@media(min-width:601px){
+  #favoriteDistricts,
+  #favoriteNeighborhoods,
+  #districts.grid,
+  #neighborhoodArea .nb-row{
+    grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  }
+}
+
+/* iPhone: 3 sütun */
+@media(max-width:600px){
+  #favoriteDistricts,
+  #favoriteNeighborhoods,
+  #districts.grid,
+  #neighborhoodArea .nb-row{
+    grid-template-columns:repeat(3,minmax(0,1fr))!important;
+    gap:4px!important;
+  }
+
+  #favoriteNeighborhoods{
+    margin-top:9px!important;
+    padding-top:11px!important;
   }
 }
 
