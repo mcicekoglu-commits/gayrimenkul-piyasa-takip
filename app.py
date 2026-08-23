@@ -36,7 +36,7 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.47-clean-version-max-display"
+VERSION = "v4.47-favorites-compact"
 BANNER_VERSION = "v4.47"
 
 DISTRICTS = [
@@ -3067,6 +3067,108 @@ body{background:#f7f8f8!important}
   }
 }
 
+
+/* ===== v4.47 favorites compact / locked layout ===== */
+
+/* Remove old neighborhood heading completely. */
+.approved-neighborhood-title{display:none!important}
+
+/* Favorite district title is visible; neighborhood has no title. */
+#favoriteDistrictLabel{
+  display:block!important;
+  font-size:11px!important;
+  font-weight:800!important;
+  color:var(--ink)!important;
+  margin:1px 2px 4px!important;
+}
+#favoriteNeighborhoodLabel{display:none!important}
+
+/* Favori alanları: sade ve sıkı. */
+#favoriteDistricts,
+#favoriteNeighborhoods{
+  border-radius:11px!important;
+  padding:5px!important;
+  margin-bottom:5px!important;
+}
+#favoriteDistricts:empty,
+#favoriteNeighborhoods:empty{
+  display:none!important;
+}
+#favoriteDistricts{
+  background:#f7fbff!important;
+  border:1px solid #e6eff7!important;
+}
+#favoriteNeighborhoods{
+  background:#fffdf7!important;
+  border:1px solid #f1e7cd!important;
+}
+
+/* Favoriler sabit; sadece favori olmayanlar accordion içinde. */
+#districtDetails,
+#neighborhoodDetails{
+  margin-top:5px!important;
+}
+#districtDetails summary,
+#neighborhoodDetails summary{
+  min-height:42px!important;
+  display:flex!important;
+  align-items:center!important;
+  padding:8px 12px!important;
+  border:1px solid #d8dde3!important;
+  border-radius:11px!important;
+  background:#fff!important;
+  font-weight:800!important;
+  font-size:14px!important;
+  cursor:pointer!important;
+  list-style:none!important;
+}
+#districtDetails summary::-webkit-details-marker,
+#neighborhoodDetails summary::-webkit-details-marker{
+  display:none!important;
+}
+#districtDetails summary::before,
+#neighborhoodDetails summary::before{
+  content:"▸";
+  margin-right:10px;
+  font-size:13px;
+  transition:transform .15s ease;
+}
+#districtDetails[open] summary::before,
+#neighborhoodDetails[open] summary::before{
+  transform:rotate(90deg);
+}
+
+#districtDetails > .grid,
+#neighborhoodDetails > #neighborhoodArea{
+  padding-top:6px!important;
+}
+
+/* Mahalleler açıldığında seçili ilçelere göre grupla. */
+.nb-district-group{
+  margin:0 0 6px;
+}
+.nb-district-name{
+  font-size:11px;
+  font-weight:800;
+  color:var(--muted);
+  padding:2px 3px 4px;
+}
+
+/* Üstte gereksiz açıklama / yardımcı alan yok. */
+.small:empty{display:none!important}
+
+@media(max-width:600px){
+  #districtDetails summary,
+  #neighborhoodDetails summary{
+    min-height:37px!important;
+    padding:6px 9px!important;
+    font-size:12px!important;
+  }
+  #favoriteDistrictLabel{
+    font-size:10px!important;
+  }
+}
+
 </style>
 </head>
 <body>
@@ -3105,19 +3207,20 @@ body{background:#f7f8f8!important}
   </div>
 
   <div class="favorite">
-        <div id="favoriteDistrictLabel" class="favorite-label">İlçeler</div>
+    <div id="favoriteDistrictLabel" class="favorite-label"></div>
     <div id="favoriteDistricts" class="favorite-section"></div>
-    <div id="favoriteNeighborhoodLabel" class="favorite-label">Mahalleler</div>
     <div id="favoriteNeighborhoods" class="favorite-section"></div>
   </div>
 
-  <details id="districtDetails" open>
+  <details id="districtDetails">
     <summary>11 İlçe</summary>
     <div id="districts" class="grid"></div>
   </details>
 
-  <div class="approved-neighborhood-title">▦&nbsp; Mahalle Seçimi</div>
-  <div id="neighborhoodArea"></div>
+  <details id="neighborhoodDetails">
+    <summary>Mahalleler</summary>
+    <div id="neighborhoodArea"></div>
+  </details>
 </div>
 
 <div class="card">
@@ -3432,8 +3535,11 @@ function neighborhoodRowHtml(d,n){
 }
 
 function renderDistricts(){
-  const visible=DISTRICTS.filter(sideVisible);
-  document.getElementById("districts").innerHTML=visible.map(districtRowHtml).join("");
+  const visible=DISTRICTS.filter(
+    d=>sideVisible(d)&&!favoriteDistricts.has(d.name)
+  );
+  document.getElementById("districts").innerHTML=
+    visible.length ? visible.map(districtRowHtml).join("") : "";
 }
 
 function renderFavorites(){
@@ -3442,6 +3548,12 @@ function renderFavorites(){
   );
 
   const fd=document.getElementById("favoriteDistricts");
+  const fdLabel=document.getElementById("favoriteDistrictLabel");
+  if(fdLabel){
+    fdLabel.textContent=visibleFavDistricts.length
+      ? `☆ Favori ilçeler (${visibleFavDistricts.length})`
+      : "";
+  }
   fd.innerHTML=visibleFavDistricts.length
     ? visibleFavDistricts.map(d=>{
         return `<div class="chip">
@@ -3452,7 +3564,7 @@ function renderFavorites(){
             onclick="toggleFavDistrict('${esc(d.name)}')">★</button>
         </div>`;
       }).join("")
-    : `<span class="small">Favori ilçe yok</span>`;
+    : "";
 
   const nbRows=[];
 
@@ -3492,7 +3604,7 @@ function renderFavorites(){
   document.getElementById("favoriteNeighborhoods").innerHTML=
     nbRows.length
       ? nbRows.join("")
-      : `<span class="small">Seçili ilçelerde favori mahalle yok</span>`;
+      : "";
 }
 
 function renderNeighborhoodArea(){
@@ -3508,13 +3620,14 @@ function renderNeighborhoodArea(){
   }
 
   const rowSize=neighborhoodRowSize();
+  const sections=[];
 
-  area.innerHTML=active.map(d=>{
-    const isOpen=openDistricts.has(d);
-    const selectedCount=(selectedNeighborhoods[d]||[]).length;
-    const names=NEIGHBORHOODS[d]||[];
+  for(const d of active){
+    const favSet=new Set(favoriteNeighborhoods[d]||[]);
+    const names=(NEIGHBORHOODS[d]||[]).filter(n=>!favSet.has(n));
+    if(!names.length)continue;
+
     const rows=[];
-
     for(let i=0;i<names.length;i+=rowSize){
       const group=names.slice(i,i+rowSize);
       rows.push(`<div class="nb-row">
@@ -3523,19 +3636,15 @@ function renderNeighborhoodArea(){
       </div>`);
     }
 
-    return `<details ${isOpen?"open":""} data-d="${esc(d)}">
-      <summary onclick='event.preventDefault();toggleDistrictOpen(${JSON.stringify(d)})'>
-        ${esc(d)} mahalleleri${selectedCount?` · ${selectedCount} seçili`:""}
-      </summary>
-      <div class="nb-list">
-        ${rows.join("")}
-      </div>
-    </details>`;
-  }).join("");
+    sections.push(`<div class="nb-district-group">
+      <div class="nb-district-name">${esc(d)}</div>
+      <div class="nb-list">${rows.join("")}</div>
+    </div>`);
+  }
 
+  area.innerHTML=sections.join("");
   applyNeighborhoodRowIndeterminate();
 }
-
 function renderAll(){
   renderDistricts();
   renderFavorites();
