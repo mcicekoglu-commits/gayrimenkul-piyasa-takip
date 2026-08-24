@@ -36,8 +36,8 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.50-floor-data-fix"
-BANNER_VERSION = "v4.50"
+VERSION = "v4.51-live-results-separated"
+BANNER_VERSION = "v4.51"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -3765,7 +3765,7 @@ body{background:#f7f8f8!important}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama Ayarlar bölümündeki 10 / 20 / 30 / 50 / 100 seçimine göre sınırlandırılır; 100 seçimi ayrıca onay ister. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Üstteki İlan Tarihi yalnız Canlı Güncelle sorgusunu belirler. Kayıtlı İlanları Ara'nın solundaki küçük 1 Hafta / 1 Ay / 3 Ay seçimi yalnız PostgreSQL geçmişini belirler ve son seçimi kalıcı olarak hatırlar. Mahalleler tablette satır başına 6, telefonda 4 gösterilir; satırın solundaki kutu o satırın tamamını seçer/kaldırır, tek mahalleler sonradan manuel değiştirilebilir. Bir ilçe seçildiğinde o ilçenin favori mahalleleri otomatik seçilir; kullanıcı daha sonra tek tek çıkarabilir. Bulunduğu Kat kodları: giriş katı=Gk, bahçe katı=Bk, yüksek giriş=Yk, çatı katı=Çk, dubleks=Dx. v4.39'da ilan detayları açık okunur; a811 hem özet hem detay yapılarında aranır. Eski boş kat alanları aynı ilan ID'si tekrar canlı taramada görüldüğünde doldurulur. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama Ayarlar bölümündeki 10 / 20 / 30 / 50 / 100 seçimine göre sınırlandırılır; 100 seçimi ayrıca onay ister. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme yalnız o çalıştırmada görülen güncel ilanları ekranda gösterir; geçmiş kayıtlar yalnız Kayıtlı İlanları Ara ile görüntülenir. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Üstteki İlan Tarihi yalnız Canlı Güncelle sorgusunu belirler. Kayıtlı İlanları Ara'nın solundaki küçük 1 Hafta / 1 Ay / 3 Ay seçimi yalnız PostgreSQL geçmişini belirler ve son seçimi kalıcı olarak hatırlar. Mahalleler tablette satır başına 6, telefonda 4 gösterilir; satırın solundaki kutu o satırın tamamını seçer/kaldırır, tek mahalleler sonradan manuel değiştirilebilir. Bir ilçe seçildiğinde o ilçenin favori mahalleleri otomatik seçilir; kullanıcı daha sonra tek tek çıkarabilir. Bulunduğu Kat kodları: giriş katı=Gk, bahçe katı=Bk, yüksek giriş=Yk, çatı katı=Çk, dubleks=Dx. v4.39'da ilan detayları açık okunur; a811 hem özet hem detay yapılarında aranır. Eski boş kat alanları aynı ilan ID'si tekrar canlı taramada görüldüğünde doldurulur. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -4093,6 +4093,50 @@ function showSuccess(text){
   document.getElementById("errorBox").classList.add("hidden");
 }
 
+
+function renderPasResults(data){
+  const analysis=data.analysis||{};
+
+  document.getElementById("mCount").textContent=analysis.count??0;
+  document.getElementById("mMedianPrice").textContent=money(analysis.median_price);
+  document.getElementById("mAvgPrice").textContent=money(analysis.avg_price);
+  document.getElementById("mMedianM2").textContent=money(analysis.avg_gross_m2_price);
+  document.getElementById("mAvgNetUsdM2").textContent=usdMoney(analysis.avg_net_usd_m2);
+  document.getElementById("mMedianNetM2").textContent=money(analysis.avg_net_m2_price);
+  document.getElementById("mAvgAge").textContent=
+    analysis.avg_building_age==null?"-":analysis.avg_building_age+" yıl";
+  document.getElementById("mAvgNetM2").textContent=
+    analysis.avg_net_m2==null?"-":analysis.avg_net_m2+" m²";
+  document.getElementById("mAvgRooms").textContent=
+    analysis.avg_rooms==null?"-":analysis.avg_rooms+"+1";
+
+  const listings=Array.isArray(data.listings)?data.listings:[];
+  document.getElementById("listingRows").innerHTML=listings.map(r=>`
+    <tr class="${r.url?"listing-clickable":""}" data-url="${esc(r.url||"")}">
+      <td>${esc(r.neighborhood||"-")}</td>
+      <td>${esc(r.rooms||"-")}</td>
+      <td>${r.building_age==null?"-":r.building_age}</td>
+      <td>${r.net_m2==null?"-":r.net_m2}</td>
+      <td class="usd-value">${usdMoney(r.net_usd_m2)}</td>
+      <td>${money(r.net_price_m2)}</td>
+      <td>${money(r.price)}</td>
+      <td>${money(r.gross_price_m2)}</td>
+      <td>${r.gross_m2==null?"-":r.gross_m2}</td>
+      <td>${r.total_floors==null?"-":r.total_floors}</td>
+      <td>${esc(r.located_floor||"-")}</td>
+      <td>${esc(r.listing_date||"-")}</td>
+      <td>${esc(r.id||"-")}</td>
+      <td>${r.opportunity_score??"-"} <span class="small">${esc(r.opportunity_label||"")}</span></td>
+    </tr>`).join("");
+
+  document.querySelectorAll(".listing-clickable").forEach(tr=>{
+    tr.onclick=()=>{if(tr.dataset.url)window.location.assign(tr.dataset.url);};
+  });
+
+  document.getElementById("resultsCard").classList.remove("hidden");
+  document.getElementById("errorBox").classList.add("hidden");
+}
+
 function formPayload(){
   const fd=new FormData(document.getElementById("pasForm"));
   return {
@@ -4131,43 +4175,7 @@ document.getElementById("pasForm").addEventListener("submit",async e=>{
     const result=await postJson("/api/search",payload), data=result.data;
     if(!result.ok||!data.ok)throw new Error(data.error||("Arama başarısız. HTTP "+result.status));
 
-    document.getElementById("mCount").textContent=data.analysis.count;
-    document.getElementById("mMedianPrice").textContent=money(data.analysis.median_price);
-    document.getElementById("mAvgPrice").textContent=money(data.analysis.avg_price);
-    document.getElementById("mMedianM2").textContent=money(data.analysis.avg_gross_m2_price);
-    document.getElementById("mAvgNetUsdM2").textContent=usdMoney(data.analysis.avg_net_usd_m2);
-    document.getElementById("mMedianNetM2").textContent=money(data.analysis.avg_net_m2_price);
-    document.getElementById("mAvgAge").textContent=
-      data.analysis.avg_building_age==null?"-":data.analysis.avg_building_age+" yıl";
-    document.getElementById("mAvgNetM2").textContent=
-      data.analysis.avg_net_m2==null?"-":data.analysis.avg_net_m2+" m²";
-    document.getElementById("mAvgRooms").textContent=
-      data.analysis.avg_rooms==null?"-":data.analysis.avg_rooms+"+1";
-
-    document.getElementById("listingRows").innerHTML=data.listings.map(r=>`
-      <tr class="${r.url?"listing-clickable":""}" data-url="${esc(r.url||"")}">
-        <td>${esc(r.neighborhood||"-")}</td>
-        <td>${esc(r.rooms||"-")}</td>
-        <td>${r.building_age==null?"-":r.building_age}</td>
-        <td>${r.net_m2==null?"-":r.net_m2}</td>
-        <td class="usd-value">${usdMoney(r.net_usd_m2)}</td>
-        <td>${money(r.net_price_m2)}</td>
-        <td>${money(r.price)}</td>
-        <td>${money(r.gross_price_m2)}</td>
-        <td>${r.gross_m2==null?"-":r.gross_m2}</td>
-        <td>${r.total_floors==null?"-":r.total_floors}</td>
-        <td>${esc(r.located_floor||"-")}</td>
-        <td>${esc(r.listing_date||"-")}</td>
-        <td>${esc(r.id||"-")}</td>
-        <td>${r.opportunity_score??"-"} <span class="small">${esc(r.opportunity_label||"")}</span></td>
-      </tr>`).join("");
-
-    document.querySelectorAll(".listing-clickable").forEach(tr=>{
-      tr.onclick=()=>{if(tr.dataset.url)window.location.assign(tr.dataset.url);};
-    });
-
-    document.getElementById("resultsCard").classList.remove("hidden");
-    document.getElementById("errorBox").classList.add("hidden");
+    renderPasResults(data);
   }catch(err){
     showError(err.message||"Beklenmeyen hata.");
   }finally{
@@ -4212,6 +4220,7 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
   let totalCached=0;
   let totalFailed=0;
   const details=[];
+  const liveIds=new Set();
 
   try{
     const base=formPayload();
@@ -4230,6 +4239,8 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
         const syncPayload={...base,district,neighborhood};
         const result=await postJson("/api/sync",syncPayload);
         const data=result.data||{};
+
+        (data.live_ids||[]).forEach(id=>liveIds.add(String(id)));
 
         if(!result.ok||!data.ok){
           totalFailed++;
@@ -4273,16 +4284,30 @@ document.getElementById("syncButton").addEventListener("click",async()=>{
     }
 
     const districtCount=new Set(pairs.map(p=>p[0])).size;
+    // CANLI GÜNCELLE: yalnızca BU çalıştırmada görülen ilanları göster.
+    // Eski PostgreSQL kayıtları burada karıştırılmaz.
+    const livePayload=formPayload();
+    livePayload.live_ids=[...liveIds];
+
+    const liveResult=await postJson("/api/live-results",livePayload);
+    const liveData=liveResult.data||{};
+
+    if(!liveResult.ok||!liveData.ok){
+      throw new Error(
+        liveData.error||("Canlı sonuçlar hazırlanamadı. HTTP "+liveResult.status)
+      );
+    }
+
+    renderPasResults(liveData);
+
     showSuccess(
       `${pairs.length} mahalle / ${districtCount} ilçe işlendi. `+
-      `${totalRaw} ücretli ham kayıt tarandı; ${totalAccepted} doğrulanmış mahalle kaydı bulundu. `+
+      `${totalRaw} ücretli ham kayıt tarandı. `+
+      `Bu canlı çalıştırmada seçili mahallelerde ${Number(liveData.analysis?.count||0)} ilan gösteriliyor. `+
       `${totalNew} yeni, ${totalUpdated} güncellendi. `+
       `${totalCached} mahalle mevcut ilçe cache/kaydından karşılandı.`+
       (totalFailed?`\n${totalFailed} mahallede hata oluştu.`:"")
     );
-
-    // Tüm seçili mahallelerin kayıtlı sonuçlarını birlikte göster.
-    document.getElementById("pasForm").requestSubmit();
 
   }finally{
     button.disabled=false;
@@ -4664,6 +4689,42 @@ def validate_pair(payload):
     return district, neighborhood
 
 
+
+def build_results_payload(listings, provider="PostgreSQL"):
+    """PAS sonuç kartı için ortak JSON çıktısı üretir."""
+    analysis = analyze(listings)
+    opportunity = {
+        str(x["id"]): x for x in opportunity_analysis(listings)
+    }
+
+    usd_try_rate = get_usd_try_rate()
+
+    rows = []
+    for item in listings:
+        row = item.to_dict()
+        row.update(opportunity.get(str(item.id), {}))
+        row["url"] = getattr(item, "_listing_url", "")
+        row["net_usd_m2"] = try_to_usd(
+            item.net_price_m2, usd_try_rate
+        )
+        rows.append(row)
+
+    analysis["avg_net_usd_m2"] = try_to_usd(
+        analysis.get("avg_net_m2_price"),
+        usd_try_rate
+    )
+
+    return {
+        "ok": True,
+        "provider": provider,
+        "version": VERSION,
+        "usd_try_rate": usd_try_rate,
+        "usd_try_source": _usd_try_cache.get("source"),
+        "analysis": analysis,
+        "listings": rows,
+    }
+
+
 @app.post("/api/search")
 def api_search():
     try:
@@ -4691,36 +4752,65 @@ def api_search():
         filters["neighborhoods"] = neighborhoods
 
         listings = load_listings_from_db(filters)
-        analysis = analyze(listings)
-        opportunity = {str(x["id"]): x for x in opportunity_analysis(listings)}
-
-        usd_try_rate = get_usd_try_rate()
-
-        rows = []
-        for item in listings:
-            row = item.to_dict()
-            row.update(opportunity.get(str(item.id), {}))
-            row["url"] = getattr(item, "_listing_url", "")
-            row["net_usd_m2"] = try_to_usd(item.net_price_m2, usd_try_rate)
-            rows.append(row)
-
-        analysis["avg_net_usd_m2"] = try_to_usd(
-            analysis.get("avg_net_m2_price"),
-            usd_try_rate
-        )
-
-        return jsonify(
-            ok=True,
-            provider="PostgreSQL",
-            version=VERSION,
-            usd_try_rate=usd_try_rate,
-            usd_try_source=_usd_try_cache.get("source"),
-            analysis=analysis,
-            listings=rows
-        )
+        return jsonify(**build_results_payload(listings, "PostgreSQL"))
 
     except Exception as exc:
         return jsonify(ok=False, error=f"Kayıtlı veri hazırlanamadı: {exc}"), 500
+
+
+
+@app.post("/api/live-results")
+def api_live_results():
+    """
+    Canlı Güncelle sonucunda yalnızca o ücretli/current çalıştırmada
+    görülen ilan ID'lerini gösterir. Geçmiş PostgreSQL kayıtlarını eklemez.
+    """
+    try:
+        payload = request.get_json(silent=True) or {}
+
+        live_ids = {
+            str(x).strip()
+            for x in (payload.get("live_ids") or [])
+            if str(x).strip()
+        }
+
+        # O çalıştırmada canlı ID yoksa sonuç da boş olmalı.
+        if not live_ids:
+            return jsonify(**build_results_payload([], "Live Sync"))
+
+        allowed_districts = {d["name"] for d in DISTRICTS}
+        districts = [
+            d for d in (payload.get("districts") or [])
+            if d in allowed_districts
+        ]
+
+        raw_neighborhoods = payload.get("neighborhoods") or {}
+        neighborhoods = {}
+        for district in districts:
+            allowed_nbs = set(NEIGHBORHOODS.get(district, []))
+            neighborhoods[district] = [
+                n for n in (raw_neighborhoods.get(district) or [])
+                if n in allowed_nbs
+            ]
+
+        filters = dict(payload)
+        filters["districts"] = districts
+        filters["neighborhoods"] = neighborhoods
+
+        # Filtrelere uyan DB kayıtlarını yükle, fakat yalnızca BU canlı koşuda
+        # görülen ilan ID'lerini bırak.
+        listings = [
+            item for item in load_listings_from_db(filters)
+            if str(item.id) in live_ids
+        ]
+
+        return jsonify(**build_results_payload(listings, "Live Sync"))
+
+    except Exception as exc:
+        return jsonify(
+            ok=False,
+            error=f"Canlı sonuçlar hazırlanamadı: {exc}"
+        ), 500
 
 
 @app.post("/api/sync")
@@ -4769,6 +4859,7 @@ def api_sync():
                 new=0,
                 updated=0,
                 selected_neighborhood_count=selected_count,
+                live_ids=[],
                 cached=True,
                 message=f"Aynı sorgu son {SYNC_CACHE_HOURS} saat içinde güncellendi; yeni Apify ücreti oluşturulmadı.",
             )
@@ -4817,6 +4908,7 @@ def api_sync():
                 rejected=result["rejected"],
                 start_url=result["start_url"],
                 hard_limit=requested_max_results,
+                live_ids=[str(x.id) for x in accepted_all],
                 cached_district=True,
                 **saved_all,
             ), 409
@@ -4846,6 +4938,7 @@ def api_sync():
             start_url=result["start_url"],
             sync_limit=requested_max_results,
             hard_limit=requested_max_results,
+            live_ids=[str(x.id) for x in accepted_all],
             cached=False,
             retired_legacy=retired_legacy,
             **saved,
@@ -4987,4 +5080,3 @@ def api_provider_status():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     app.run(host="0.0.0.0", port=port)
-
