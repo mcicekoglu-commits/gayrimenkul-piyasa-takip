@@ -36,8 +36,8 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.53-construction-age"
-BANNER_VERSION = "v4.53"
+VERSION = "v4.54-parking-column"
+BANNER_VERSION = "v4.54"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -814,6 +814,7 @@ class Listing:
     building_age: int | None = None
     total_floors: int | None = None
     located_floor: str = ""
+    parking: str = ""
     property_group: str = "residential"
     location_verified: bool = False
     price_verified: bool = False
@@ -874,6 +875,7 @@ def init_db():
                     building_age INTEGER,
                     total_floors INTEGER,
                     located_floor TEXT NOT NULL DEFAULT '',
+                    parking TEXT NOT NULL DEFAULT '',
                     property_group TEXT NOT NULL DEFAULT 'residential',
                     location_verified BOOLEAN NOT NULL DEFAULT FALSE,
                     price_verified BOOLEAN NOT NULL DEFAULT FALSE,
@@ -939,6 +941,7 @@ def init_db():
                     building_age INTEGER,
                     total_floors INTEGER,
                     located_floor TEXT NOT NULL DEFAULT '',
+                    parking TEXT NOT NULL DEFAULT '',
                     property_group TEXT NOT NULL DEFAULT 'residential',
                     source TEXT NOT NULL DEFAULT '',
                     url TEXT NOT NULL DEFAULT '',
@@ -952,12 +955,12 @@ def init_db():
                 INSERT INTO pas_legacy_archive (
                     listing_id,district,neighborhood,title,price,gross_m2,net_m2,
                     rooms,listing_date,original_listing_date,building_age,total_floors,
-                    located_floor,property_group,source,url,first_seen,last_seen
+                    located_floor,parking,property_group,source,url,first_seen,last_seen
                 )
                 SELECT
                     id,district,neighborhood,title,price,gross_m2,net_m2,
                     rooms,listing_date,original_listing_date,building_age,total_floors,
-                    located_floor,property_group,source,url,first_seen,last_seen
+                    located_floor,parking,property_group,source,url,first_seen,last_seen
                 FROM pas_listings
                 WHERE NOT (location_verified=TRUE AND price_verified=TRUE)
                 ON CONFLICT (listing_id) DO UPDATE SET
@@ -973,6 +976,7 @@ def init_db():
                     building_age=EXCLUDED.building_age,
                     total_floors=EXCLUDED.total_floors,
                     located_floor=EXCLUDED.located_floor,
+                    parking=CASE WHEN EXCLUDED.parking<>'' THEN EXCLUDED.parking ELSE pas_listings.parking END,
                     property_group=EXCLUDED.property_group,
                     source=EXCLUDED.source,
                     url=EXCLUDED.url,
@@ -1013,6 +1017,10 @@ def init_db():
             cur.execute("""
                 ALTER TABLE pas_listings
                 ADD COLUMN IF NOT EXISTS located_floor TEXT NOT NULL DEFAULT ''
+            """)
+            cur.execute("""
+                ALTER TABLE pas_listings
+                ADD COLUMN IF NOT EXISTS parking TEXT NOT NULL DEFAULT ''
             """)
             cur.execute("""
                 ALTER TABLE pas_listings
@@ -1124,7 +1132,7 @@ def init_db():
                     INSERT INTO pas_listings (
                         id,district,neighborhood,title,price,gross_m2,net_m2,
                         rooms,listing_date,original_listing_date,building_age,
-                        total_floors,located_floor,property_group,
+                        total_floors,located_floor,parking,property_group,
                         location_verified,price_verified,verification_version,
                         source,url,active,first_seen,last_seen,updated_at
                     )
@@ -1149,6 +1157,7 @@ def init_db():
                         building_age=COALESCE(EXCLUDED.building_age,pas_listings.building_age),
                         total_floors=COALESCE(EXCLUDED.total_floors,pas_listings.total_floors),
                         located_floor=CASE WHEN EXCLUDED.located_floor<>'' THEN EXCLUDED.located_floor ELSE pas_listings.located_floor END,
+                    parking=CASE WHEN EXCLUDED.parking<>'' THEN EXCLUDED.parking ELSE pas_listings.parking END,
                         property_group=CASE WHEN EXCLUDED.property_group<>'' THEN EXCLUDED.property_group ELSE pas_listings.property_group END,
                         location_verified=TRUE,
                         price_verified=TRUE,
@@ -1162,7 +1171,7 @@ def init_db():
                     r["title"] or "", r["price"], r["gross_m2"], r["net_m2"],
                     r["rooms"] or "", r["listing_date"] or "",
                     r["original_listing_date"] or r["listing_date"] or "",
-                    r["building_age"], r["total_floors"], r["located_floor"] or "",
+                    r["building_age"], r["total_floors"], r["located_floor"] or "", r.get("parking") or "",
                     r["property_group"] or "residential",
                     r["source"] or "sahibinden-real-estate", url,
                     r["first_seen"], r["last_seen"]
@@ -1231,6 +1240,7 @@ def save_listings_to_db(listings):
                         building_age=COALESCE(EXCLUDED.building_age,pas_listings.building_age),
                         total_floors=COALESCE(EXCLUDED.total_floors,pas_listings.total_floors),
                         located_floor=CASE WHEN EXCLUDED.located_floor<>'' THEN EXCLUDED.located_floor ELSE pas_listings.located_floor END,
+                    parking=CASE WHEN EXCLUDED.parking<>'' THEN EXCLUDED.parking ELSE pas_listings.parking END,
                         property_group=EXCLUDED.property_group,
                         location_verified=EXCLUDED.location_verified,
                         price_verified=EXCLUDED.price_verified,
@@ -1244,7 +1254,7 @@ def save_listings_to_db(listings):
                     str(item.id), item.district, item.neighborhood, item.title or "",
                     item.price, item.gross_m2, item.net_m2, item.rooms or "",
                     item.listing_date or "", item.listing_date or "", item.building_age,
-                    item.total_floors, item.located_floor or "",
+                    item.total_floors, item.located_floor or "", item.parking or "",
                     item.property_group or "residential",
                     bool(item.location_verified),
                     bool(item.price_verified),
@@ -1622,7 +1632,7 @@ def load_listings_from_db(filters):
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id,district,neighborhood,title,price,gross_m2,net_m2,
-                       rooms,listing_date,original_listing_date,building_age,total_floors,located_floor,
+                       rooms,listing_date,original_listing_date,building_age,total_floors,located_floor,parking,
                        property_group,location_verified,price_verified,
                        verification_version,source,url
                 FROM pas_listings
@@ -1669,6 +1679,7 @@ def load_listings_from_db(filters):
             building_age=parse_int(r["building_age"]),
             total_floors=parse_int(r["total_floors"]),
             located_floor=r["located_floor"] or "",
+            parking=r.get("parking") or "",
             property_group=r["property_group"] or "residential",
             location_verified=bool(r["location_verified"]),
             price_verified=bool(r["price_verified"]),
@@ -1710,7 +1721,7 @@ def load_legacy_archive(filters, limit=300):
             cur.execute("""
                 SELECT listing_id,district,neighborhood,title,price,gross_m2,net_m2,
                        rooms,listing_date,original_listing_date,building_age,total_floors,
-                       located_floor,property_group,source,url,first_seen,last_seen,recovered_at
+                       located_floor,parking,property_group,source,url,first_seen,last_seen,recovered_at
                 FROM pas_legacy_archive
                 WHERE district=ANY(%s)
                   AND recovered_at IS NULL
@@ -1745,6 +1756,7 @@ def load_legacy_archive(filters, limit=300):
             "building_age": parse_int(r["building_age"]),
             "total_floors": parse_int(r["total_floors"]),
             "located_floor": r["located_floor"] or "",
+            "parking": r.get("parking") or "",
             "property_group": r["property_group"] or "",
             "url": r["url"] or "",
             "status": "Doğrulama bekliyor",
@@ -1757,6 +1769,46 @@ def load_legacy_archive(filters, limit=300):
 # =========================================================
 # APIFY — SEARCH SCRAPER PRO / MAHALLE
 # =========================================================
+
+
+def normalize_parking(value):
+    if value is None:
+        return ""
+    s = slug(str(value))
+    if not s:
+        return ""
+    if ("acik" in s and "kapali" in s) or ("open" in s and ("closed" in s or "indoor" in s)):
+        return "Ak"
+    if "kapali" in s or "closed" in s or "indoor" in s:
+        return "Kap."
+    if "acik" in s or "open" in s or "outdoor" in s:
+        return "Aç."
+    return ""
+
+def extract_parking(item, raw=None):
+    sources=[item]
+    if isinstance(raw,dict): sources.append(raw)
+    for src in sources:
+        for key in ("parking","parkingType","carPark","carpark","otopark"):
+            v=src.get(key)
+            n=normalize_parking(v)
+            if n: return n
+        for key in ("attributes","properties","features","details","classifiedAttributes"):
+            block=src.get(key)
+            if isinstance(block,dict):
+                for k,v in block.items():
+                    if "otopark" in slug(str(k)) or "parking" in slug(str(k)):
+                        n=normalize_parking(v)
+                        if n: return n
+            elif isinstance(block,list):
+                for e in block:
+                    if not isinstance(e,dict): continue
+                    name=e.get("name") or e.get("label") or e.get("title") or e.get("key") or e.get("attributeName")
+                    if "otopark" in slug(str(name)) or "parking" in slug(str(name)):
+                        v=e.get("value") or e.get("text") or e.get("displayValue") or e.get("attributeValue")
+                        n=normalize_parking(v)
+                        if n: return n
+    return ""
 
 class NeighborhoodApifyProvider:
     def __init__(self):
@@ -2298,6 +2350,7 @@ class NeighborhoodApifyProvider:
         # a811 artık yalnız geriye dönük fallback olarak kullanılır.
         located_floor_raw = self._extract_located_floor(item, raw)
         located_floor = normalize_floor_text(located_floor_raw)
+        parking = extract_parking(item, raw)
 
         listed_at = (
             self._pick(item, "listingDate", "listedAt", "createdAt", "date", "dateCreated")
@@ -2369,6 +2422,7 @@ class NeighborhoodApifyProvider:
             building_age=building_age,
             total_floors=total_floors,
             located_floor=located_floor,
+            parking=parking,
             property_group=property_group,
             location_verified=True,
             price_verified=True,
@@ -3648,6 +3702,7 @@ body{background:#f7f8f8!important}
   }
 }
 
+.parking-col{width:38px!important;min-width:38px!important;max-width:38px!important;padding-left:2px!important;padding-right:2px!important;text-align:center!important;white-space:nowrap;}
 </style>
 </head>
 <body>
@@ -3814,7 +3869,7 @@ body{background:#f7f8f8!important}
           <th>Mahalle</th><th>Oda</th><th>Yaş</th>
           <th>Net m²</th><th class="usd-value">Net $/m²</th><th>Net TL/m²</th><th>Fiyat</th>
           <th>Brüt TL/m²</th><th>Brüt m²</th>
-          <th>Bina Katı</th><th>Bulunduğu Kat</th>
+          <th class="parking-col">Oto.</th><th>Bina Katı</th><th>Bulunduğu Kat</th>
           <th>İlan Tarihi</th><th>İlan ID</th><th>PAS</th>
         </tr>
       </thead>
@@ -4189,7 +4244,7 @@ function renderPasResults(data){
       <td>${money(r.price)}</td>
       <td>${money(r.gross_price_m2)}</td>
       <td>${r.gross_m2==null?"-":r.gross_m2}</td>
-      <td>${r.total_floors==null?"-":r.total_floors}</td>
+      <td class="parking-col">${esc(r.parking||"-")}</td><td>${r.total_floors==null?"-":r.total_floors}</td>
       <td>${esc(r.located_floor||"-")}</td>
       <td>${esc(r.listing_date||"-")}</td>
       <td>${esc(r.id||"-")}</td>
