@@ -36,8 +36,8 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.52-floor-direct-field-fix"
-BANNER_VERSION = "v4.52"
+VERSION = "v4.53-construction-age"
+BANNER_VERSION = "v4.53"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -683,6 +683,17 @@ def parse_building_age(value):
         return int(value)
 
     text = str(value).strip().casefold()
+
+    # Özel PAS değeri: -1 = Yapım Aşamasında.
+    # Böylece "0 (Ready)" ile karışmaz; ekranda "Yap" gösterebiliriz.
+    normalized = slug(text)
+    if (
+        "yapim-asamasinda" in normalized
+        or "yapim-asamasi" in normalized
+        or "under-construction" in normalized
+        or "under-construction" in normalized.replace("_", "-")
+    ):
+        return -1
 
     m = re.search(r"(\d+)\s*[-–]\s*(\d+)", text)
     if m:
@@ -1571,9 +1582,14 @@ def listing_matches_filters(row, filters):
         actual = getattr(row, field)
         if actual is None:
             return False
-        if op == ">=" and actual < wanted:
+
+        # DB'deki -1 yalnız "Yapım Aşamasında" anlamına gelir.
+        # Bina yaşı filtresinde bunu 0 yaş gibi değerlendir.
+        compare_actual = 0 if field == "building_age" and actual == -1 else actual
+
+        if op == ">=" and compare_actual < wanted:
             return False
-        if op == "<=" and actual > wanted:
+        if op == "<=" and compare_actual > wanted:
             return False
 
     for prop, lo_key, hi_key in (
@@ -2157,7 +2173,11 @@ class NeighborhoodApifyProvider:
         if age_min is not None and age_max is not None and 0 <= age_min <= age_max <= 31:
             ages = []
             for age in range(age_min, age_max + 1):
-                ages.append("0 (Ready)" if age == 0 else str(age))
+                if age == 0:
+                    # Tek ücretli taramada iki adet 0 yaş durumunu da kapsa.
+                    ages.extend(["0 (Ready)", "0 (Under construction)"])
+                else:
+                    ages.append(str(age))
             if ages:
                 actor_input["buildingAge"] = ages
 
@@ -2443,7 +2463,7 @@ def analyze(listings):
     prices = [x.price for x in listings if x.price]
     gross = [x.gross_price_m2 for x in listings if x.gross_price_m2]
     net = [x.net_price_m2 for x in listings if x.net_price_m2]
-    ages = [x.building_age for x in listings if x.building_age is not None]
+    ages = [x.building_age for x in listings if x.building_age is not None and x.building_age >= 0]
     net_sizes = [x.net_m2 for x in listings if x.net_m2 and x.net_m2 > 0]
 
     # Oda ortalaması: 3+1 -> 3, 2+1 -> 2.
@@ -3812,7 +3832,7 @@ body{background:#f7f8f8!important}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama Ayarlar bölümündeki 10 / 20 / 30 / 50 / 100 seçimine göre sınırlandırılır; 100 seçimi ayrıca onay ister. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme yalnız o çalıştırmada görülen güncel ilanları ekranda gösterir; geçmiş kayıtlar yalnız Kayıtlı İlanları Ara ile görüntülenir. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Üstteki İlan Tarihi yalnız Canlı Güncelle sorgusunu belirler. Kayıtlı İlanları Ara'nın solundaki küçük 1 Hafta / 1 Ay / 3 Ay seçimi yalnız PostgreSQL geçmişini belirler ve son seçimi kalıcı olarak hatırlar. Mahalleler tablette satır başına 6, telefonda 4 gösterilir; satırın solundaki kutu o satırın tamamını seçer/kaldırır, tek mahalleler sonradan manuel değiştirilebilir. Bir ilçe seçildiğinde o ilçenin favori mahalleleri otomatik seçilir; kullanıcı daha sonra tek tek çıkarabilir. Bulunduğu Kat kodları: giriş katı=Gk, bahçe katı=Bk, yüksek giriş=Yk, çatı katı=Çk, dubleks=Dx. v4.52'de Bulunduğu Kat için Actor'ın flat `floor` alanı birincil kaynaktır; a811 yalnız geriye dönük fallback olarak kullanılır. Eski boş kat alanları aynı ilan ID'si tekrar canlı taramada görüldüğünde doldurulur. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama Ayarlar bölümündeki 10 / 20 / 30 / 50 / 100 seçimine göre sınırlandırılır; 100 seçimi ayrıca onay ister. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme yalnız o çalıştırmada görülen güncel ilanları ekranda gösterir; geçmiş kayıtlar yalnız Kayıtlı İlanları Ara ile görüntülenir. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Üstteki İlan Tarihi yalnız Canlı Güncelle sorgusunu belirler. Kayıtlı İlanları Ara'nın solundaki küçük 1 Hafta / 1 Ay / 3 Ay seçimi yalnız PostgreSQL geçmişini belirler ve son seçimi kalıcı olarak hatırlar. Mahalleler tablette satır başına 6, telefonda 4 gösterilir; satırın solundaki kutu o satırın tamamını seçer/kaldırır, tek mahalleler sonradan manuel değiştirilebilir. Bir ilçe seçildiğinde o ilçenin favori mahalleleri otomatik seçilir; kullanıcı daha sonra tek tek çıkarabilir. Bina Yaşı 0 filtresi aynı ücretli taramada hem hazır hem yapım aşamasındaki ilanları kapsar; yapım aşamasındakiler ekranda Yap görünür. Bulunduğu Kat kodları: giriş katı=Gk, bahçe katı=Bk, yüksek giriş=Yk, çatı katı=Çk, dubleks=Dx. v4.52'de Bulunduğu Kat için Actor'ın flat `floor` alanı birincil kaynaktır; a811 yalnız geriye dönük fallback olarak kullanılır. Eski boş kat alanları aynı ilan ID'si tekrar canlı taramada görüldüğünde doldurulur. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
@@ -4162,7 +4182,7 @@ function renderPasResults(data){
     <tr class="${r.url?"listing-clickable":""}" data-url="${esc(r.url||"")}">
       <td>${esc(r.neighborhood||"-")}</td>
       <td>${esc(r.rooms||"-")}</td>
-      <td>${r.building_age==null?"-":r.building_age}</td>
+      <td>${r.building_age===-1?"Yap":(r.building_age==null?"-":r.building_age)}</td>
       <td>${r.net_m2==null?"-":r.net_m2}</td>
       <td class="usd-value">${usdMoney(r.net_usd_m2)}</td>
       <td>${money(r.net_price_m2)}</td>
