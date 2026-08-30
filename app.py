@@ -36,8 +36,8 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.51-live-results-separated"
-BANNER_VERSION = "v4.51"
+VERSION = "v4.52-floor-direct-field-fix"
+BANNER_VERSION = "v4.52"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -2002,6 +2002,79 @@ class NeighborhoodApifyProvider:
 
         return None
 
+
+    @staticmethod
+    def _unwrap_attribute_value(value):
+        """Actor alanı dict gelirse gerçek gösterim değerini çıkarır."""
+        if isinstance(value, dict):
+            for key in ("value", "displayValue", "text", "name", "label"):
+                if value.get(key) not in (None, ""):
+                    return value.get(key)
+            return None
+        return value
+
+    @staticmethod
+    def _extract_located_floor(item, raw=None):
+        """
+        clearpath/sahibinden-real-estate çıktısındaki flat `floor` alanını
+        birincil kaynak kabul eder. Eski a811 yaklaşımı yalnız fallback'tir.
+        """
+        raw = raw if isinstance(raw, dict) else {}
+
+        direct_keys = (
+            "floor",
+            "locatedFloor",
+            "floorNumber",
+            "currentFloor",
+            "locatedFloorLabel",
+            "floorLabel",
+            "floorName",
+            "floorInfo",
+        )
+
+        # 1) Actor'ın güncel flat JSON çıktısı: item["floor"].
+        for key in direct_keys:
+            if isinstance(item, dict) and key in item:
+                value = NeighborhoodApifyProvider._unwrap_attribute_value(item.get(key))
+                if value not in (None, ""):
+                    return value
+
+        # 2) rawSummary/rawDetail/detail gibi nested container'lar.
+        for container in NeighborhoodApifyProvider._attribute_containers(item):
+            for key in direct_keys:
+                if key not in container:
+                    continue
+                value = NeighborhoodApifyProvider._unwrap_attribute_value(container.get(key))
+                if value not in (None, ""):
+                    return value
+
+        # 3) Ayrı raw payload.
+        for key in direct_keys:
+            if key in raw:
+                value = NeighborhoodApifyProvider._unwrap_attribute_value(raw.get(key))
+                if value not in (None, ""):
+                    return value
+
+        # 4) Türkçe etiketli attribute yapıları.
+        value = NeighborhoodApifyProvider._named_attribute(
+            item,
+            "Bulunduğu Kat", "Bulundugu Kat",
+            "Bulunduğu Katı", "Bulundugu Kati",
+            "Dairenin Bulunduğu Kat", "Dairenin Bulundugu Kat",
+            "Kat Konumu", "Kat Bilgisi"
+        )
+        value = NeighborhoodApifyProvider._unwrap_attribute_value(value)
+        if value not in (None, ""):
+            return value
+
+        # 5) Eski Sahibinden coded attribute yalnız son fallback.
+        value = NeighborhoodApifyProvider._coded_attribute(item, "a811")
+        value = NeighborhoodApifyProvider._unwrap_attribute_value(value)
+        if value not in (None, ""):
+            return value
+
+        return None
+
     def run_neighborhood(self, district, neighborhood, filters=None, max_results=None):
         if not self.configured():
             raise RuntimeError("APIFY_API_TOKEN tanımlı değil.")
@@ -2201,35 +2274,9 @@ class NeighborhoodApifyProvider:
 
         total_floors = self._extract_total_floors(item, raw)
 
-        # a811 Sahibinden "Bulunduğu Kat" alanıdır.
-        # Önce coded attribute'u ara; detail açıkken en güvenilir kaynak budur.
-        located_floor_raw = self._coded_attribute(item, "a811")
-
-        if located_floor_raw in (None, ""):
-            located_floor_raw = self._named_attribute(
-                item,
-                "Bulunduğu Kat", "Bulundugu Kat",
-                "Bulunduğu Katı", "Bulundugu Kati",
-                "Dairenin Bulunduğu Kat", "Dairenin Bulundugu Kat",
-                "Kat Konumu", "Kat Bilgisi", "Kat"
-            )
-
-        if located_floor_raw in (None, ""):
-            located_floor_raw = self._pick(
-                item,
-                "locatedFloorLabel", "floorLabel", "floorName",
-                "locatedFloor", "floorInfo", "currentFloor",
-                "floor", "floorNumber"
-            )
-
-        if located_floor_raw in (None, ""):
-            located_floor_raw = self._pick(
-                raw,
-                "locatedFloorLabel", "floorLabel", "floorName",
-                "locatedFloor", "floorInfo", "currentFloor",
-                "floor", "floorNumber"
-            )
-
+        # v4.52: Actor güncel çıktısında `floor` flat alanı birincil kaynaktır.
+        # a811 artık yalnız geriye dönük fallback olarak kullanılır.
+        located_floor_raw = self._extract_located_floor(item, raw)
         located_floor = normalize_floor_text(located_floor_raw)
 
         listed_at = (
@@ -3765,7 +3812,7 @@ body{background:#f7f8f8!important}
 Normal analiz Apify çalıştırmaz ve ücret oluşturmaz.
 Canlı güncelleme yalnız doğrulanmış seçili mahalle URL’sini çalıştırır; enrichment/telefon/detay kapalıdır.
 Aynı mahalle + aynı filtre {{ cache_hours }} saat içinde yeniden ücretli çalıştırılmaz.
-Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama Ayarlar bölümündeki 10 / 20 / 30 / 50 / 100 seçimine göre sınırlandırılır; 100 seçimi ayrıca onay ister. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme yalnız o çalıştırmada görülen güncel ilanları ekranda gösterir; geçmiş kayıtlar yalnız Kayıtlı İlanları Ara ile görüntülenir. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Üstteki İlan Tarihi yalnız Canlı Güncelle sorgusunu belirler. Kayıtlı İlanları Ara'nın solundaki küçük 1 Hafta / 1 Ay / 3 Ay seçimi yalnız PostgreSQL geçmişini belirler ve son seçimi kalıcı olarak hatırlar. Mahalleler tablette satır başına 6, telefonda 4 gösterilir; satırın solundaki kutu o satırın tamamını seçer/kaldırır, tek mahalleler sonradan manuel değiştirilebilir. Bir ilçe seçildiğinde o ilçenin favori mahalleleri otomatik seçilir; kullanıcı daha sonra tek tek çıkarabilir. Bulunduğu Kat kodları: giriş katı=Gk, bahçe katı=Bk, yüksek giriş=Yk, çatı katı=Çk, dubleks=Dx. v4.39'da ilan detayları açık okunur; a811 hem özet hem detay yapılarında aranır. Eski boş kat alanları aynı ilan ID'si tekrar canlı taramada görüldüğünde doldurulur. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
+Canlı güncellemede bu Actor mahalle filtresi desteklemediği için ilçe taranır; ancak ücretli tarama Ayarlar bölümündeki 10 / 20 / 30 / 50 / 100 seçimine göre sınırlandırılır; 100 seçimi ayrıca onay ister. Aynı ilçe + aynı filtre cache süresi içinde farklı mahalleler için yeniden ücretli çalıştırılmaz. Mahalle, Actor'ın açık konum alanlarından kesin doğrulanmadan ilan gösterilmez. Fiyat, numeric price ile formattedPrice birebir uyuşmadan ilan gösterilmez. Veri miladı 20 Ağustos 2026'dır. Bu tarihten önceki kayıtlar kalıcı olarak temizlenir; 20 Ağustos ve sonrası tek doğrulanmış listede tutulur. Favori ilçe, favori mahalle ve son seçimler sürümden bağımsız kalıcı tarayıcı kaydında saklanır. Bina kat sayısı ve bulunduğu kat filtreleri de son seçimi hatırlar. Bulunduğu kat kodları: giriş=gk, yüksek giriş=yk, çatı katı=çk, dubleks=dx. Canlı güncelleme yalnız o çalıştırmada görülen güncel ilanları ekranda gösterir; geçmiş kayıtlar yalnız Kayıtlı İlanları Ara ile görüntülenir. Canlı güncelleme birden fazla mahalleyi destekler; birden fazla seçimde işlem öncesi onay sorulur. Üstteki İlan Tarihi yalnız Canlı Güncelle sorgusunu belirler. Kayıtlı İlanları Ara'nın solundaki küçük 1 Hafta / 1 Ay / 3 Ay seçimi yalnız PostgreSQL geçmişini belirler ve son seçimi kalıcı olarak hatırlar. Mahalleler tablette satır başına 6, telefonda 4 gösterilir; satırın solundaki kutu o satırın tamamını seçer/kaldırır, tek mahalleler sonradan manuel değiştirilebilir. Bir ilçe seçildiğinde o ilçenin favori mahalleleri otomatik seçilir; kullanıcı daha sonra tek tek çıkarabilir. Bulunduğu Kat kodları: giriş katı=Gk, bahçe katı=Bk, yüksek giriş=Yk, çatı katı=Çk, dubleks=Dx. v4.52'de Bulunduğu Kat için Actor'ın flat `floor` alanı birincil kaynaktır; a811 yalnız geriye dönük fallback olarak kullanılır. Eski boş kat alanları aynı ilan ID'si tekrar canlı taramada görüldüğünde doldurulur. İlanın ilk ilan tarihi ID bazında korunur; günlük güncellemeler geçmiş kayıtları silmez ve her gözlem ayrıca tarihçeye yazılır. Favori mahalleler yıldızdan çıkarılana kadar kaydedilir; ana ekranda yalnız seçili ilçeye ait favori mahalleler sabit görünür.
 Yalnız yeni Real Estate Actor tarafından doğrulanmış aktif ilanlar gösterilir. Fiyat yalnız numeric price alanından alınır ve formattedPrice ile çapraz doğrulanır. Net TL/m² = price / netSize; Brüt TL/m² = price / grossSize. Net $/m², TCMB USD döviz satış kuru kullanılarak hesaplanır ve kur bellekte cache'lenir.</div>
   </details>
 </div>
