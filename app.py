@@ -36,8 +36,8 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.55-parking-filter-summary"
-BANNER_VERSION = "v4.55"
+VERSION = "v4.56-parking-db-migration-fix"
+BANNER_VERSION = "v4.56"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -899,6 +899,10 @@ def init_db():
                   AND listing_date<>''
             """)
             cur.execute("""
+                ALTER TABLE pas_listings
+                ADD COLUMN IF NOT EXISTS parking TEXT NOT NULL DEFAULT ''
+            """)
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS pas_listing_history (
                     id BIGSERIAL PRIMARY KEY,
                     listing_id TEXT NOT NULL,
@@ -952,6 +956,10 @@ def init_db():
                 )
             """)
             cur.execute("""
+                ALTER TABLE pas_legacy_archive
+                ADD COLUMN IF NOT EXISTS parking TEXT NOT NULL DEFAULT ''
+            """)
+            cur.execute("""
                 INSERT INTO pas_legacy_archive (
                     listing_id,district,neighborhood,title,price,gross_m2,net_m2,
                     rooms,listing_date,original_listing_date,building_age,total_floors,
@@ -976,7 +984,7 @@ def init_db():
                     building_age=EXCLUDED.building_age,
                     total_floors=EXCLUDED.total_floors,
                     located_floor=EXCLUDED.located_floor,
-                    parking=CASE WHEN EXCLUDED.parking<>'' THEN EXCLUDED.parking ELSE pas_listings.parking END,
+                    parking=CASE WHEN EXCLUDED.parking<>'' THEN EXCLUDED.parking ELSE pas_legacy_archive.parking END,
                     property_group=EXCLUDED.property_group,
                     source=EXCLUDED.source,
                     url=EXCLUDED.url,
