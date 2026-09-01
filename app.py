@@ -36,8 +36,8 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.57-parking-sql-placeholder-fix"
-BANNER_VERSION = "v4.57"
+VERSION = "v4.58-parking-percentage-fix"
+BANNER_VERSION = "v4.58"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -2548,17 +2548,18 @@ def analyze(listings):
     avg_rooms = round(statistics.mean(room_values), 1) if room_values else None
 
     # Kapalı Otopark %:
+    # Referans tüm ilanlardır.
     # "Kap." ve "Ak" kapalı otopark imkanına sahip kabul edilir.
-    # Yüzde yalnız otopark bilgisi bulunan ilanlar üzerinden hesaplanır.
-    known_parking = [
-        str(getattr(x, "parking", "") or "").strip()
+    # Örn. 22 ilanın 2'sinde kapalı otopark varsa: %9.
+    total_listing_count = len(listings)
+    closed_parking_count = sum(
+        1
         for x in listings
-        if str(getattr(x, "parking", "") or "").strip() in ("Ak", "Kap.", "Aç.")
-    ]
-    closed_parking_count = sum(1 for p in known_parking if p in ("Ak", "Kap."))
+        if str(getattr(x, "parking", "") or "").strip() in ("Ak", "Kap.")
+    )
     closed_parking_pct = (
-        round((closed_parking_count / len(known_parking)) * 100)
-        if known_parking else None
+        round((closed_parking_count / total_listing_count) * 100)
+        if total_listing_count else None
     )
 
     return {
