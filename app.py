@@ -36,8 +36,8 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.59-parking-known-values-only"
-BANNER_VERSION = "v4.59"
+VERSION = "v4.60-parking-closed-only-percentage"
+BANNER_VERSION = "v4.60"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -2550,7 +2550,9 @@ def analyze(listings):
     # Kapalı Otopark %:
     # Boş / bilinmeyen otopark değerleri hesaba katılmaz.
     # Payda yalnız otopark bilgisi gerçekten bulunan ilanlardır.
-    # "Kap." ve "Ak" kapalı otopark imkanına sahip kabul edilir.
+    # Referans SADECE "Kap." değeridir.
+    # "Ak" (Açık & Kapalı) ayrı bir kategori olarak paydada kalır,
+    # fakat Kapalı Otopark yüzdesinin payına eklenmez.
     known_parking = [
         str(getattr(x, "parking", "") or "").strip()
         for x in listings
@@ -2558,7 +2560,7 @@ def analyze(listings):
     ]
     closed_parking_count = sum(
         1 for p in known_parking
-        if p in ("Ak", "Kap.")
+        if p == "Kap."
     )
     closed_parking_pct = (
         round((closed_parking_count / len(known_parking)) * 100)
