@@ -36,8 +36,8 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.54-parking-column"
-BANNER_VERSION = "v4.54"
+VERSION = "v4.55-parking-filter-summary"
+BANNER_VERSION = "v4.55"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -1574,6 +1574,12 @@ def listing_matches_filters(row, filters):
     ):
         return False
 
+    parking_filter = str(filters.get("parking_filter") or "").strip()
+    if parking_filter:
+        actual_parking = str(getattr(row, "parking", "") or "").strip()
+        if actual_parking != parking_filter:
+            return False
+
     comparisons = (
         ("total_floors", "total_floors_min", ">="),
         ("total_floors", "total_floors_max", "<="),
@@ -2533,6 +2539,20 @@ def analyze(listings):
 
     avg_rooms = round(statistics.mean(room_values), 1) if room_values else None
 
+    # Kapalı Otopark %:
+    # "Kap." ve "Ak" kapalı otopark imkanına sahip kabul edilir.
+    # Yüzde yalnız otopark bilgisi bulunan ilanlar üzerinden hesaplanır.
+    known_parking = [
+        str(getattr(x, "parking", "") or "").strip()
+        for x in listings
+        if str(getattr(x, "parking", "") or "").strip() in ("Ak", "Kap.", "Aç.")
+    ]
+    closed_parking_count = sum(1 for p in known_parking if p in ("Ak", "Kap."))
+    closed_parking_pct = (
+        round((closed_parking_count / len(known_parking)) * 100)
+        if known_parking else None
+    )
+
     return {
         "count": len(listings),
         "median_price": round(statistics.median(prices)) if prices else None,
@@ -2542,6 +2562,7 @@ def analyze(listings):
         "avg_building_age": round(statistics.mean(ages), 1) if ages else None,
         "avg_net_m2": round(statistics.mean(net_sizes), 1) if net_sizes else None,
         "avg_rooms": avg_rooms,
+        "closed_parking_pct": closed_parking_pct,
     }
 
 
@@ -3815,6 +3836,15 @@ body{background:#f7f8f8!important}
         <option value="detached">Müstakil</option>
       </select>
     </div>
+    <div>
+      <label class="field">Otopark</label>
+      <select name="parking_filter">
+        <option value="">Farketmez</option>
+        <option value="Ak">Açık & Kapalı</option>
+        <option value="Kap.">Kapalı</option>
+        <option value="Aç.">Açık</option>
+      </select>
+    </div>
   </div>
 
   <div id="favoriteFiltersWrap" class="filter-fav-wrap hidden">
@@ -3859,6 +3889,7 @@ body{background:#f7f8f8!important}
     <div class="metric"><div class="k">Ort. Yaş</div><div class="v" id="mAvgAge">-</div></div>
     <div class="metric"><div class="k">Ort. Net m²</div><div class="v" id="mAvgNetM2">-</div></div>
     <div class="metric"><div class="k">Ort. Oda</div><div class="v" id="mAvgRooms">-</div></div>
+    <div class="metric"><div class="k">Kapalı Otopark</div><div class="v" id="mClosedParkingPct">-</div></div>
   </div>
 
   <div class="title" style="margin-top:13px">İlanlar</div>
@@ -4231,6 +4262,8 @@ function renderPasResults(data){
     analysis.avg_net_m2==null?"-":analysis.avg_net_m2+" m²";
   document.getElementById("mAvgRooms").textContent=
     analysis.avg_rooms==null?"-":analysis.avg_rooms+"+1";
+  document.getElementById("mClosedParkingPct").textContent=
+    analysis.closed_parking_pct==null?"-":"%"+analysis.closed_parking_pct;
 
   const listings=Array.isArray(data.listings)?data.listings:[];
   document.getElementById("listingRows").innerHTML=listings.map(r=>`
@@ -4276,6 +4309,7 @@ function formPayload(){
     total_floors_min:fd.get("total_floors_min")||"",
     total_floors_max:fd.get("total_floors_max")||"",
     located_floor_filter:fd.get("located_floor_filter")||"",
+    parking_filter:fd.get("parking_filter")||"",
     net_m2_min:fd.get("net_m2_min")||"",
     net_m2_max:fd.get("net_m2_max")||"",
     gross_m2_min:fd.get("gross_m2_min")||"",
@@ -4499,7 +4533,7 @@ function collectState(){
   [
     "date_filter","property_group","rooms","min_m2","max_m2","min_price","max_price",
     "building_age_min","building_age_max",
-    "total_floors_min","total_floors_max","located_floor_filter",
+    "total_floors_min","total_floors_max","located_floor_filter","parking_filter",
     "net_m2_min","net_m2_max","gross_m2_min","gross_m2_max"
   ].forEach(k=>filters[k]=fd.get(k)||"");
 
