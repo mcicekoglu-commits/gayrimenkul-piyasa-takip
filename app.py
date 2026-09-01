@@ -36,8 +36,8 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.61-located-floor-high-ground-fix"
-BANNER_VERSION = "v4.61"
+VERSION = "v4.62-remove-region-district-heading"
+BANNER_VERSION = "v4.62"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -3822,7 +3822,7 @@ body{background:#f7f8f8!important}
 
 <div class="card">
   <div class="topline">
-    <div class="title">📍 Bölge ve İlçe Seçimi</div>
+    <div class="title"></div>
     <div class="topline-actions">
       <div class="top-settings">
         <button class="settings-toggle" id="settingsToggle" type="button">Max 50</button>
