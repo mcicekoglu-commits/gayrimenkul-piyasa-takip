@@ -36,8 +36,8 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.60-parking-closed-only-percentage"
-BANNER_VERSION = "v4.60"
+VERSION = "v4.61-located-floor-high-ground-fix"
+BANNER_VERSION = "v4.61"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -2098,60 +2098,130 @@ class NeighborhoodApifyProvider:
     @staticmethod
     def _extract_located_floor(item, raw=None):
         """
-        clearpath/sahibinden-real-estate çıktısındaki flat `floor` alanını
-        birincil kaynak kabul eder. Eski a811 yaklaşımı yalnız fallback'tir.
+        'Bulunduğu Kat' bilgisini Actor'ın flat alanlarından ve detay
+        attribute bloklarından çıkarır. Özellikle Yüksek Giriş gibi
+        metinsel değerlerin boş kalmasını önler.
         """
         raw = raw if isinstance(raw, dict) else {}
 
         direct_keys = (
             "floor",
             "locatedFloor",
+            "located_floor",
             "floorNumber",
             "currentFloor",
             "locatedFloorLabel",
             "floorLabel",
             "floorName",
             "floorInfo",
+            "floorLocation",
+            "floor_location",
         )
 
-        # 1) Actor'ın güncel flat JSON çıktısı: item["floor"].
-        for key in direct_keys:
-            if isinstance(item, dict) and key in item:
-                value = NeighborhoodApifyProvider._unwrap_attribute_value(item.get(key))
-                if value not in (None, ""):
-                    return value
+        def unwrap(value):
+            return NeighborhoodApifyProvider._unwrap_attribute_value(value)
 
-        # 2) rawSummary/rawDetail/detail gibi nested container'lar.
-        for container in NeighborhoodApifyProvider._attribute_containers(item):
+        # 1) Güncel Actor flat alanları.
+        for source in (item, raw):
+            if not isinstance(source, dict):
+                continue
             for key in direct_keys:
-                if key not in container:
-                    continue
-                value = NeighborhoodApifyProvider._unwrap_attribute_value(container.get(key))
-                if value not in (None, ""):
-                    return value
+                if key in source:
+                    value = unwrap(source.get(key))
+                    if value not in (None, ""):
+                        return value
 
-        # 3) Ayrı raw payload.
-        for key in direct_keys:
-            if key in raw:
-                value = NeighborhoodApifyProvider._unwrap_attribute_value(raw.get(key))
-                if value not in (None, ""):
-                    return value
+        # 2) Actor'ın nested container'ları.
+        for source in (item, raw):
+            if not isinstance(source, dict):
+                continue
+            for container in NeighborhoodApifyProvider._attribute_containers(source):
+                for key in direct_keys:
+                    if key not in container:
+                        continue
+                    value = unwrap(container.get(key))
+                    if value not in (None, ""):
+                        return value
 
-        # 4) Türkçe etiketli attribute yapıları.
-        value = NeighborhoodApifyProvider._named_attribute(
-            item,
+        # 3) Etiketli attribute: hem item hem raw detay payload taranır.
+        floor_labels = (
             "Bulunduğu Kat", "Bulundugu Kat",
             "Bulunduğu Katı", "Bulundugu Kati",
             "Dairenin Bulunduğu Kat", "Dairenin Bulundugu Kat",
-            "Kat Konumu", "Kat Bilgisi"
+            "Kat Konumu", "Kat Bilgisi",
+            "Located Floor", "Current Floor",
         )
-        value = NeighborhoodApifyProvider._unwrap_attribute_value(value)
-        if value not in (None, ""):
-            return value
+
+        for source in (item, raw):
+            if not isinstance(source, dict):
+                continue
+            value = NeighborhoodApifyProvider._named_attribute(
+                source, *floor_labels
+            )
+            value = unwrap(value)
+            if value not in (None, ""):
+                return value
+
+        # 4) Bazı detail payload'larda attribute adı/value farklı anahtarlarda
+        # tutuluyor. Liste bloklarını ayrıca doğrudan tara.
+        wanted = {slug(x) for x in floor_labels}
+
+        for source in (item, raw):
+            if not isinstance(source, dict):
+                continue
+
+            for container in NeighborhoodApifyProvider._attribute_containers(source):
+                for bucket_name in (
+                    "attributes", "searchAttributes", "summaryAttributes",
+                    "detailAttributes", "classifiedAttributes",
+                    "attributeValues", "features", "properties",
+                    "details", "specifications"
+                ):
+                    bucket = container.get(bucket_name)
+
+                    if isinstance(bucket, dict):
+                        for k, v in bucket.items():
+                            key_slug = slug(str(k))
+                            if key_slug in wanted or "bulundugu-kat" in key_slug:
+                                value = unwrap(v)
+                                if value not in (None, ""):
+                                    return value
+
+                    elif isinstance(bucket, list):
+                        for entry in bucket:
+                            if not isinstance(entry, dict):
+                                continue
+
+                            label = (
+                                entry.get("name")
+                                or entry.get("label")
+                                or entry.get("title")
+                                or entry.get("attributeName")
+                                or entry.get("key")
+                                or ""
+                            )
+                            label_slug = slug(str(label))
+
+                            if label_slug not in wanted and "bulundugu-kat" not in label_slug:
+                                continue
+
+                            for value_key in (
+                                "value", "text", "displayValue",
+                                "attributeValue", "selectedValue",
+                                "rawValue", "name"
+                            ):
+                                value = unwrap(entry.get(value_key))
+                                if value not in (None, ""):
+                                    return value
 
         # 5) Eski Sahibinden coded attribute yalnız son fallback.
         value = NeighborhoodApifyProvider._coded_attribute(item, "a811")
-        value = NeighborhoodApifyProvider._unwrap_attribute_value(value)
+        value = unwrap(value)
+        if value not in (None, ""):
+            return value
+
+        value = NeighborhoodApifyProvider._coded_attribute(raw, "a811")
+        value = unwrap(value)
         if value not in (None, ""):
             return value
 
