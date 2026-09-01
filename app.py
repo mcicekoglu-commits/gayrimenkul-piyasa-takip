@@ -36,8 +36,8 @@ app = Flask(__name__)
 # 10) Mobil arayüz kompakt, favori ilçe/mahalle yıldızlıdır.
 # =========================================================
 
-VERSION = "v4.56-parking-db-migration-fix"
-BANNER_VERSION = "v4.56"
+VERSION = "v4.57-parking-sql-placeholder-fix"
+BANNER_VERSION = "v4.57"
 
 DISTRICTS = [
     {"name": "Kadıköy", "side": "anadolu", "favorite": True},
@@ -1217,13 +1217,13 @@ def save_listings_to_db(listings):
                 cur.execute("""
                     INSERT INTO pas_listings (
                         id,district,neighborhood,title,price,gross_m2,net_m2,
-                        rooms,listing_date,original_listing_date,building_age,total_floors,located_floor,
+                        rooms,listing_date,original_listing_date,building_age,total_floors,located_floor,parking,
                         property_group,location_verified,price_verified,verification_version,
                         source,url,active,
                         first_seen,last_seen,updated_at
                     )
                     VALUES (
-                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                         %s,%s,%s,%s,%s,%s,TRUE,
                         NOW(),NOW(),NOW()
                     )
